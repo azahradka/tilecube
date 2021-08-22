@@ -1,27 +1,28 @@
-import logging
-
+import pyproj
+import xarray as xr
+import xesmf as xe
 import morecantile
 import numpy as np
-import pyproj
 import scipy
-import xesmf as xe
 from morecantile import Tile, BoundingBox
 from shapely.geometry import Polygon
 from xarray import DataArray
 
-from storage import PyramidStorage
-
 
 class PyramidTile:
-    def __init__(self, tile: Tile, weights, bounds, shape_in, shape_out):
+    def __init__(self, tile: Tile, weights, bounds, shape_in, shape_out, y_flipped=False):
         self.tile = tile
         self.weights = weights
         self.bounds = bounds
         self.shape_in = shape_in
         self.shape_out = shape_out
+        self.y_flipped = y_flipped
 
     def transform(self, data: DataArray):
-        data_out = xe.smm.apply_weights(self.weights, data.values, self.shape_in, self.shape_out)
+        vals = data.values
+        if self.y_flipped:
+            vals = vals[::-1, :]
+        data_out = xe.smm.apply_weights(self.weights, vals, self.shape_in, self.shape_out)
         return DataArray(data_out, dims=('y', 'x'))
 
     @property
@@ -56,29 +57,32 @@ class Pyramid:
             self,
             x: DataArray,
             y: DataArray,
-            proj: pyproj.CRS = None,
-            storage: PyramidStorage = None):
+            proj: pyproj.CRS = None):
         """
 
         Args:
-            x: `xarray.DataArray` of the X coordinates of the source grid. Can be one dimensional (rectilinear) or two
-                dimensional (curvilinear).
-            y: `xarray.DataArray` of the Y (vertical) coordinates of the source grid
+            x: `xarray.DataArray` of the X coordinates of the source grid. Must be one dimensional (rectilinear).
+            y: `xarray.DataArray` of the Y coordinates of the source grid. Must be one dimensional (rectilinear).
             proj: Coordinate Reference System (CRS) of the source grid. Leave None to use Lat/Lon (EPSG:3857)
-            storage: `PyramidStorage` object to use to persist the regridding weights and metadata. Leave None to
-                avoid persistence and operate on-the-fly.
         """
-        self.src_x = x
-        self.src_y = y
-        self.storage = storage
+        if x.squeeze().ndim != 1 or y.squeeze().ndim != 1:
+            raise NotImplementedError("Grid must currently be rectilinear (1-d x and y)")
+        self.src_x = xr.DataArray(data=x.data, coords=dict(x=x.data), dims=['x'])
+        # TODO comment
+        if y[0] > y[-1]:
+            self.y_flipped = True
+            self.src_y = xr.DataArray(data=y.data[::-1], coords=dict(y=y.data[::-1]), dims=['y'])
+        else:
+            self.y_flipped = False
+            self.src_y = xr.DataArray(data=y.data, coords=dict(y=y.data), dims=['y'])
         if proj is None:
-            self.src_proj = pyproj.CRS.from_epsg(3857)
+            self.src_proj = pyproj.CRS.from_epsg(4326)
         else:
             self.src_proj = proj
 
         # Tiles are in Web Mercator projection (EPSG:3857)
         self.tile_proj = pyproj.CRS.from_epsg(3857)
-        self.tms = morecantile.tms.get('WebMercatorQuad')
+        self.tile_matrix_set = morecantile.tms.get('WebMercatorQuad')
         # We use WGS84 Lat/Lon (EPSG:4326) as an intermediary
         self.lonlat_proj = pyproj.CRS.from_epsg(4326)
         self.tile_lonlat_transformer = pyproj.Transformer.from_crs(
@@ -86,6 +90,8 @@ class Pyramid:
         # If the source data is already in lat/lon, we can skip this reprojection
         if self.src_proj.equals(self.lonlat_proj):
             self.src_lonlat_tranformer = None
+            if self.src_x.min() < -180 or self.src_x.max() > 180:
+                raise ValueError('The supplied Longitude (x) values must be in the range of -180 <= x <= 180')
         else:
             self.src_lonlat_tranformer = pyproj.Transformer.from_crs(
                 self.src_proj, self.lonlat_proj, always_xy=True)
@@ -97,11 +103,11 @@ class Pyramid:
         # doesn't really matter.
         # TODO: does this work well when source is in a rectilinear grid?
         self.src_bounds = BoundingBox(
-            self.src_x.min(),
-            self.src_y.min(),
-            self.src_x.max(),
-            self.src_y.max())
-        self.src_bounding_poly = self._get_bounding_poly(
+            float(self.src_x.min()),
+            float(self.src_y.min()),
+            float(self.src_x.max()),
+            float(self.src_y.max()))
+        self.src_bounding_poly = self.get_bounding_poly(
             self.src_bounds.left,
             self.src_bounds.bottom,
             self.src_bounds.right,
@@ -109,7 +115,8 @@ class Pyramid:
         # Resolution of the source grid, in whatever units the source grid projection is in.
         self.src_resolution = (self.src_bounds.right - self.src_bounds.left) / len(self.src_x)
 
-    def _get_bounding_poly(self, xmin, ymin, xmax, ymax, transform=None):
+    @staticmethod
+    def get_bounding_poly(xmin, ymin, xmax, ymax, transform=None):
         """ Create a `shapely.Polygon` bounding box from bounding box corners for a grid of data.
 
         Optionally, reproject the bounding polygon. The bounding polygon is created with 256 vertices along each axis.
@@ -124,18 +131,18 @@ class Pyramid:
         Returns:
 
         """
-        # 1-D Vector from x/y min to max, with 256 vertices
-        tile_xvector = np.linspace(xmin, xmax, num=self.TILESIZE)
-        tile_yvector = np.linspace(ymin, ymax, num=self.TILESIZE)
+        # Vectors from x/y min to max, with 256 vertices
+        tile_xvector = np.linspace(xmin, xmax, num=Pyramid.TILESIZE)
+        tile_yvector = np.linspace(ymin, ymax, num=Pyramid.TILESIZE)
         # x coordinate vector is generated by concatenating:
         #   1. 256 coordinates of xmin ("left" side of rectangle)
         #   2. 256 coordinates evenly spaced from xmin to xmax ("top" of rectangle)
         #   3. 256 coordinates of xmax("right" side of rectangle)
         #   4. 256 coordinates evenly spaced from xmax to xmin ("bottom" of rectangle)
         x = np.concatenate([
-            np.array([xmin] * self.TILESIZE),
+            np.array([xmin] * Pyramid.TILESIZE),
             tile_xvector,
-            np.array([xmax] * self.TILESIZE),
+            np.array([xmax] * Pyramid.TILESIZE),
             tile_xvector[::-1]])
         # y coordinate vector is generated by concatenating:
         #   1. 256 coordinates evenly spaced from ymin to ymax ("left" side of rectangle)
@@ -144,9 +151,9 @@ class Pyramid:
         #   4. 256 coordinates of ymin ("bottom" of rectangle)
         y = np.concatenate([
             tile_yvector,
-            np.array([ymax] * self.TILESIZE),
+            np.array([ymax] * Pyramid.TILESIZE),
             tile_yvector[::-1],
-            np.array([ymin] * self.TILESIZE)])
+            np.array([ymin] * Pyramid.TILESIZE)])
         # Reproject the polygon coordinates if necessary
         if transform is not None:
             x, y = transform(x, y)
@@ -154,36 +161,53 @@ class Pyramid:
         polygon = Polygon(zip(x, y))
         return polygon
 
-    def _calculate_pyramid_tile(self, tile: Tile, method) -> PyramidTile or None:
+    def calculate_pyramid_tile(self, tile: Tile, method) -> PyramidTile or None:
+        """
 
-        # Check to see if we already have already used an interpolation method for this zoom level.
-        # If so make sure we are being consistent and using the same one
-        existing_method = self.storage.read_method(tile)
-        if existing_method is not None and existing_method != method:
-            raise ValueError(f'Cannot create pyramid tile using interpolation method {method}'
-                             f'when existing tiles at zoom level {tile.z} have been created'
-                             f'using interpolation method {existing_method}.')
+        Args:
+            tile: The xyz web map tile to generate
+            method: The xESMF regridding algorithm to use
+                One of:
+                    ["bilinear",
+                    "conservative",
+                    "nearest_s2d",
+                    "nearest_d2s",
+                    "patch"]
+                See https://pangeo-xesmf.readthedocs.io/en/latest/notebooks/Compare_algorithms.html for details
 
-        # Create a bounding box for the web map tile in the source grid projection
-        tile_bounds = self.tms.xy_bounds(tile)
-        tile_bounding_poly = self._get_bounding_poly(
+        Returns: The generated PyramidTile for the requested xyz tile index
+            None if there is no intersection of the source data with the given tile
+            The PyramidTile includes the tranformation matrix to reproject and regrid the source dataset to the given
+                web map tile.
+
+        """
+
+        # Create a bounding box for the web map tile, in the source grid projection
+        tile_bounds = self.tile_matrix_set.xy_bounds(tile)
+        tile_bounding_poly = self.get_bounding_poly(
             tile_bounds.left,
             tile_bounds.bottom,
             tile_bounds.right,
             tile_bounds.top,
             self.tile_src_transformer.transform)
+        # Determine area of the source grid which intersects the current tile (still in source grid projection)
         clipped_data_bounding_poly = self.src_bounding_poly.intersection(tile_bounding_poly)
+        # If no part of the source grid intersects the current tile then there is nothing else to calculate
         if clipped_data_bounding_poly.is_empty:
             return None
+
+        # Create grid of source coordinates which intersect the current tile, in lat/long
+        # Start by selecting the region of the source grid which is within the current tile bounds
+        #   But, include an additional grid point on each side because we need to have the first data point outside a
+        #   given tile domain for some regridding algorithms to work (e.g. "conservative").
         xmin, ymin, xmax, ymax = clipped_data_bounding_poly.bounds
         x = self.src_x.sel(x=slice(xmin - self.src_resolution, xmax + self.src_resolution))
         y = self.src_y.sel(y=slice(ymin - self.src_resolution, ymax + self.src_resolution))
-
-        # Create grid of source coordinates in lat/long
-        src_xgrid, src_ygrid = np.meshgrid(x, y)
-        # We need to have some data in the source grids
+        src_xgrid, src_ygrid = np.meshgrid(x.data, y.data)
+        # Confirm we have data in the source grids
         if 0 in src_xgrid.shape:
             return None
+        # Reproject the source data grid for the current tile into lat/lon
         # If the source data is already in lat/lon, we can skip this reprojection
         if self.src_lonlat_tranformer is None:
             src_longrid, src_latgrid = src_xgrid, src_ygrid
@@ -191,7 +215,9 @@ class Pyramid:
             src_longrid, src_latgrid = self.src_lonlat_tranformer.transform(src_xgrid, src_ygrid)
 
         # Create grid of tile coordinates in lat/long
-        tile_bounds = self.tms.xy_bounds(tile)
+        # Note that `half_grid_width` is compensated for because the tile bounds are reported to the exterior edge of
+        #   the tile grid cells, while the grid coordinates are referenced to the center of each grid cell.
+        tile_bounds = self.tile_matrix_set.xy_bounds(tile)
         half_grid_width = ((tile_bounds.top - tile_bounds.bottom) / self.TILESIZE) / 2
         tile_yvector = np.linspace(
             tile_bounds.bottom + half_grid_width, tile_bounds.top - half_grid_width,
@@ -202,9 +228,7 @@ class Pyramid:
         tile_xgrid, tile_ygrid = np.meshgrid(tile_xvector, tile_yvector)
         tile_longrid, tile_latgrid = self.tile_lonlat_transformer.transform(tile_xgrid, tile_ygrid)
 
-        # Generate regridder from source to tile grids
-        # with self.__suppress_stdout():
-        log = logging.getLogger(__name__)
+        # Generate `xesmf.Regridder` from source grid to tile grid
         print('Calculating regridder')
         regridder = xe.Regridder({'lon': src_longrid, 'lat': src_latgrid},
                                  {'lon': tile_longrid, 'lat': tile_latgrid}, method)
@@ -216,45 +240,6 @@ class Pyramid:
         M[num_nonzeros == 0, 0] = np.NaN
         regridder.weights = scipy.sparse.coo_matrix(M)
         bounds = (x.min(), y.min(), x.max(), y.max())
-        pyramid_tile = PyramidTile(tile, regridder.weights, bounds, regridder.shape_in, regridder.shape_out)
+        pyramid_tile = PyramidTile(tile, regridder.weights, bounds, regridder.shape_in, regridder.shape_out, self.y_flipped)
         return pyramid_tile
 
-    def get_pyramid_tile(self, tile, method):
-        """ Read or calculate a PyramidTile.
-
-        * If the pyramid tile exists in storage it is read out and returned.
-        * If the pyramid tile does not exist in storage but can be calculated, it is calculated and returned.
-        * If the pyramid tile cannot be calculated because there is no overlap between the data and tile,
-            then None is returned.
-
-        Args:
-            tile:
-            method:
-
-        Returns: the requested PyramidTile. None if there is no overlap between the data and `tile`.
-
-        """
-        if self.storage.read_parent_index(tile) is False:
-            return None
-        tile_index = self.storage.read_index(tile)
-        if tile_index is False:
-            return None
-        elif tile_index is True:
-            return self.storage.read_pyramid_tile(tile)
-        else:
-            return self._calculate_pyramid_tile(tile, method)
-
-    def write_pyramid_tile(self, tile, method, overwrite=False):
-
-        # Return the existing tile if one exists and overwrite is False
-        if (not overwrite) and self.storage.check_pyramid_tile_exists(tile):
-            return self.get_pyramid_tile(tile, method)
-
-        # Get the pyramid
-        pyramid_tile = self.get_pyramid_tile(tile, method)
-        if pyramid_tile is None:
-            self.storage.write_index(tile, False)
-            return None
-        self.storage.write_index(tile, True)
-        self.storage.write_pyramid_tile(pyramid_tile)
-        return pyramid_tile

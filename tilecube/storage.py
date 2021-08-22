@@ -1,20 +1,92 @@
 import abc
 
 import h5py
-import mercantile
+import morecantile
 import numpy as np
 import scipy
 import scipy.sparse
-from mercantile import Tile
+from morecantile import Tile
 import xarray as xr
 import pyproj
 
-import app
-from app.interfaces import PyramidStorage
-from app.core import PyramidTile, Pyramid
+import tilecube
+from tilecube.core.pyramid import Pyramid, PyramidTile
 
 
-class HDF5PyramidStorage(PyramidStorage):
+class TileCubeStorage:
+    def __init__(self):
+        self.index_lengths = {z: 2**z for z in range(0, 19)}
+
+    @abc.abstractmethod
+    def write_pyramid(self, pyramid: Pyramid):
+        pass
+
+    @abc.abstractmethod
+    def read_pyramid(self) -> Pyramid:
+        pass
+
+    @abc.abstractmethod
+    def write_index(self, tile: morecantile.Tile, value: bool):
+        pass
+
+    @abc.abstractmethod
+    def read_index(self, tile: morecantile.Tile) -> bool or None:
+        """ Read the tile index to determine a a PyramidTile exists for the given Tile location.
+
+        Args:
+            tile: ZXY Tile location
+
+        Returns: True if the PyramidTile exists, False if it does not.
+            None if the index is not initialized.
+
+        """
+        pass
+
+    @abc.abstractmethod
+    def read_parent_index(self, tile: morecantile.Tile) -> bool or None:
+        """ Read the tile index to determine a a PyramidTile exists for the *parent* tile location.
+
+        The parent tile is the tile which encompasses the requesed tile location, at zoom level `tile.z - 1`
+
+        Args:
+            tile: ZXY Tile location
+
+        Returns: True if the PyramidTile exists, False if it does not.
+            None if the index is not initialized.
+
+        """
+        pass
+
+    @abc.abstractmethod
+    def write_method(self, tile: morecantile.Tile, method):
+        pass
+
+    @abc.abstractmethod
+    def read_method(self, tile: morecantile.Tile) -> str or None:
+        pass
+
+    @abc.abstractmethod
+    def write_pyramid_tile(self, pyramid: 'PyramidTile'):
+        pass
+
+    @abc.abstractmethod
+    def read_pyramid_tile(self, tile: morecantile.Tile) -> 'PyramidTile' or None:
+        """ Read pyramid file from disk.
+
+        Args:
+            tile: ZXY Tile location
+
+        Returns: The requested `PyramidTile`. `None` if it does not exist.
+
+        """
+        pass
+
+    @abc.abstractmethod
+    def check_pyramid_tile_exists(self, tile: morecantile.Tile) -> bool:
+        pass
+
+
+class HDF5TileCubeStorage(TileCubeStorage):
 
     min_pyramid_version = '0.0.1'
 
@@ -36,7 +108,7 @@ class HDF5PyramidStorage(PyramidStorage):
         self.file.attrs['src_proj'] = pyramid.src_proj.to_json()
         self.file.attrs['tile_proj'] = pyramid.tile_proj.to_json()
 
-        self.file.attrs['pyramid_version'] = app.__version__
+        self.file.attrs['pyramid_version'] = tilecube.__version__
 
     def _verify_version_compatibility(self, version):
         v = [int(v) for v in version.split('.')]
@@ -51,6 +123,7 @@ class HDF5PyramidStorage(PyramidStorage):
                                f'file to proceed.')
 
     def read_pyramid(self) -> Pyramid:
+        # TODO add y_flipped
         if 'src_x' not in self.file or 'src_y' not in self.file or 'pyramid_version' not in self.file.attrs:
             raise RuntimeError('The file does not contain a valid Pyramid')
         self._verify_version_compatibility(self.file.attrs['pyramid_version'])
@@ -58,14 +131,12 @@ class HDF5PyramidStorage(PyramidStorage):
         src_y = xr.DataArray(self.file['src_y'])
         src_proj_json = self.file.attrs['src_proj']
         src_proj = pyproj.CRS.from_json(src_proj_json)
-        tile_proj_json = self.file.attrs['tile_proj']
-        tile_proj = pyproj.CRS.from_json(tile_proj_json)
+        # tile_proj_json = self.file.attrs['tile_proj']
+        # tile_proj = pyproj.CRS.from_json(tile_proj_json)
         pyramid = Pyramid(
             src_x,
             src_y,
-            proj=src_proj,
-            tile_proj=tile_proj,
-            storage=self)
+            proj=src_proj)
         return pyramid
 
     def write_index(self, tile: Tile, value: bool):
@@ -96,7 +167,7 @@ class HDF5PyramidStorage(PyramidStorage):
 
     def read_parent_index(self, tile) -> bool or None:
         if str(tile.z - 1) in self.file.keys():
-            parent_tile = mercantile.parent(tile)
+            parent_tile = morecantile.tms.get('WebMercatorQuad').parent(tile)
             return self.read_index(parent_tile)
 
     def write_method(self, tile, method):
@@ -147,76 +218,3 @@ class HDF5PyramidStorage(PyramidStorage):
             return True
         else:
             return False
-
-
-class PyramidStorage(object):
-    def __init__(self):
-        self.index_lengths = {z: 2**z for z in range(0, 19)}
-
-    @abc.abstractmethod
-    def write_pyramid(self, pyramid: 'Pyramid'):
-        pass
-
-    @abc.abstractmethod
-    def read_pyramid(self) -> 'Pyramid':
-        pass
-
-    @abc.abstractmethod
-    def write_index(self, tile: mercantile.Tile, value: bool):
-        pass
-
-    @abc.abstractmethod
-    def read_index(self, tile: mercantile.Tile) -> bool or None:
-        """ Read the tile index to determine a a PyramidTile exists for the given Tile location.
-
-        Args:
-            tile: ZXY Tile location
-
-        Returns: True if the PyramidTile exists, False if it does not.
-            None if the index is not initialized.
-
-        """
-        pass
-
-    @abc.abstractmethod
-    def read_parent_index(self, tile: mercantile.Tile) -> bool or None:
-        """ Read the tile index to determine a a PyramidTile exists for the *parent* tile location.
-
-        The parent tile is the tile which encompasses the requesed tile location, at zoom level `tile.z - 1`
-
-        Args:
-            tile: ZXY Tile location
-
-        Returns: True if the PyramidTile exists, False if it does not.
-            None if the index is not initialized.
-
-        """
-        pass
-
-    @abc.abstractmethod
-    def write_method(self, tile: mercantile.Tile, method):
-        pass
-
-    @abc.abstractmethod
-    def read_method(self, tile: mercantile.Tile) -> str:
-        pass
-
-    @abc.abstractmethod
-    def write_pyramid_tile(self, pyramid: 'PyramidTile'):
-        pass
-
-    @abc.abstractmethod
-    def read_pyramid_tile(self, tile: mercantile.Tile) -> 'PyramidTile' or None:
-        """ Read pyramid file from disk.
-
-        Args:
-            tile: ZXY Tile location
-
-        Returns: The requested `PyramidTile`. `None` if it does not exist.
-
-        """
-        pass
-
-    @abc.abstractmethod
-    def check_pyramid_tile_exists(self, tile: mercantile.Tile) -> bool:
-        pass
