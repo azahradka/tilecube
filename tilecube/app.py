@@ -1,6 +1,5 @@
 import io
 
-from pyproj import CRS
 import numpy as np
 import xarray as xr
 import morecantile
@@ -10,13 +9,14 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 import matplotlib.colors
 
-from tilecube.core.pyramid import Pyramid
+from generators import PyramidGenerator
 
 app = Flask(__name__)
-da = xr.tutorial.open_dataset("air_temperature").isel(time=0)['air']
+ds = xr.tutorial.open_dataset("air_temperature")
 x_name = 'lon'
 y_name = 'lat'
-da['lon'] = da['lon'] - 360
+ds['lon'] = ds['lon'] - 360
+da = ds.isel(time=0)['air']
 cmap = plt.get_cmap('viridis').copy()
 cmap.set_under(alpha=0.)
 cmap.set_bad(alpha=0.)
@@ -24,7 +24,7 @@ bounds = np.linspace(start=float(da.min()), stop=float(da.max()), num=6)
 norm = mpl.colors.BoundaryNorm(bounds, cmap.N)
 
 src_pyproj = None # CRS.from_proj4('+ellps=WGS84 +proj=stere +lat_0=90 +lon_0=252.0 +x_0=0.0 +y_0=0.0 +lat_ts=60 +no_defs')
-pyramid = Pyramid(da[x_name], da[y_name], src_pyproj)
+pyramid = PyramidGenerator(da[x_name], da[y_name], src_pyproj)
 
 
 @app.route('/')
@@ -40,12 +40,12 @@ def test(time, z, x, y):
     else:
         method = 'bilinear'
 
-    pyramid_tile = pyramid.calculate_pyramid_tile(tile, method)  # TODO variable methods
+    pyramid_tile = pyramid.calculate_tile_generator(tile, method)  # TODO variable methods
     if pyramid_tile is None:
-        arr = np.empty((Pyramid.TILESIZE, Pyramid.TILESIZE))
+        arr = np.empty((PyramidGenerator.TILESIZE, PyramidGenerator.TILESIZE))
         arr[:] = np.nan
     else:
-        ds_subset = da.sel({x_name: slice(pyramid_tile.xmin, pyramid_tile.xmax),
+        ds_subset = ds.isel(time=time)['air'].sel({x_name: slice(pyramid_tile.xmin, pyramid_tile.xmax),
                             y_name: slice(pyramid_tile.ymax, pyramid_tile.ymin)})
         ds_out = pyramid_tile.transform(ds_subset)
         arr = ds_out.values

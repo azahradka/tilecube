@@ -1,112 +1,35 @@
-import abc
-
 import h5py
 import morecantile
 import numpy as np
-import scipy
-import scipy.sparse
-from morecantile import Tile
-import xarray as xr
 import pyproj
+import scipy
+import xarray as xr
+from morecantile import Tile
 
 import tilecube
-from tilecube.core.pyramid import Pyramid, PyramidTile
-
-
-class TileCubeStorage:
-    def __init__(self):
-        self.index_lengths = {z: 2**z for z in range(0, 19)}
-
-    @abc.abstractmethod
-    def write_pyramid(self, pyramid: Pyramid):
-        pass
-
-    @abc.abstractmethod
-    def read_pyramid(self) -> Pyramid:
-        pass
-
-    @abc.abstractmethod
-    def write_index(self, tile: morecantile.Tile, value: bool):
-        pass
-
-    @abc.abstractmethod
-    def read_index(self, tile: morecantile.Tile) -> bool or None:
-        """ Read the tile index to determine a a PyramidTile exists for the given Tile location.
-
-        Args:
-            tile: ZXY Tile location
-
-        Returns: True if the PyramidTile exists, False if it does not.
-            None if the index is not initialized.
-
-        """
-        pass
-
-    @abc.abstractmethod
-    def read_parent_index(self, tile: morecantile.Tile) -> bool or None:
-        """ Read the tile index to determine a a PyramidTile exists for the *parent* tile location.
-
-        The parent tile is the tile which encompasses the requesed tile location, at zoom level `tile.z - 1`
-
-        Args:
-            tile: ZXY Tile location
-
-        Returns: True if the PyramidTile exists, False if it does not.
-            None if the index is not initialized.
-
-        """
-        pass
-
-    @abc.abstractmethod
-    def write_method(self, tile: morecantile.Tile, method):
-        pass
-
-    @abc.abstractmethod
-    def read_method(self, tile: morecantile.Tile) -> str or None:
-        pass
-
-    @abc.abstractmethod
-    def write_pyramid_tile(self, pyramid: 'PyramidTile'):
-        pass
-
-    @abc.abstractmethod
-    def read_pyramid_tile(self, tile: morecantile.Tile) -> 'PyramidTile' or None:
-        """ Read pyramid file from disk.
-
-        Args:
-            tile: ZXY Tile location
-
-        Returns: The requested `PyramidTile`. `None` if it does not exist.
-
-        """
-        pass
-
-    @abc.abstractmethod
-    def check_pyramid_tile_exists(self, tile: morecantile.Tile) -> bool:
-        pass
+from generators import PyramidGenerator, TileGenerator
+from storage.base import TileCubeStorage
 
 
 class HDF5TileCubeStorage(TileCubeStorage):
-
-    min_pyramid_version = '0.0.1'
 
     def __init__(self, filename: str):
         super().__init__()
         self.filename = filename
         self.file: h5py.File = h5py.File(filename, 'r')
 
-    def write_pyramid(self, pyramid: Pyramid):
+    def write_pyramid_generator(self, pyramid_generator: PyramidGenerator):
         if 'src_x' in self.file:
             del self.file['src_x']
         if 'src_y' in self.file:
             del self.file['src_y']
-        x_ds = self.file.create_dataset('src_x', (len(pyramid.src_x)), pyramid.src_x.dtype)
-        y_ds = self.file.create_dataset('src_y', (len(pyramid.src_y)), pyramid.src_y.dtype)
-        x_ds[:] = pyramid.src_x.values
-        y_ds[:] = pyramid.src_y.values
+        x_ds = self.file.create_dataset('src_x', (len(pyramid_generator.src_x)), pyramid_generator.src_x.dtype)
+        y_ds = self.file.create_dataset('src_y', (len(pyramid_generator.src_y)), pyramid_generator.src_y.dtype)
+        x_ds[:] = pyramid_generator.src_x.values
+        y_ds[:] = pyramid_generator.src_y.values
 
-        self.file.attrs['src_proj'] = pyramid.src_proj.to_json()
-        self.file.attrs['tile_proj'] = pyramid.tile_proj.to_json()
+        self.file.attrs['src_proj'] = pyramid_generator.src_proj.to_json()
+        self.file.attrs['tile_proj'] = pyramid_generator.tile_proj.to_json()
 
         self.file.attrs['pyramid_version'] = tilecube.__version__
 
@@ -122,7 +45,7 @@ class HDF5TileCubeStorage(TileCubeStorage):
                                f'version which can be read is {self.min_pyramid_version}. Re-pyramid the '
                                f'file to proceed.')
 
-    def read_pyramid(self) -> Pyramid:
+    def read_pyramid_generator(self) -> PyramidGenerator:
         # TODO add y_flipped
         if 'src_x' not in self.file or 'src_y' not in self.file or 'pyramid_version' not in self.file.attrs:
             raise RuntimeError('The file does not contain a valid Pyramid')
@@ -133,7 +56,7 @@ class HDF5TileCubeStorage(TileCubeStorage):
         src_proj = pyproj.CRS.from_json(src_proj_json)
         # tile_proj_json = self.file.attrs['tile_proj']
         # tile_proj = pyproj.CRS.from_json(tile_proj_json)
-        pyramid = Pyramid(
+        pyramid = PyramidGenerator(
             src_x,
             src_y,
             proj=src_proj)
@@ -183,7 +106,7 @@ class HDF5TileCubeStorage(TileCubeStorage):
         else:
             return None
 
-    def write_pyramid_tile(self, pyramid_tile: PyramidTile):
+    def write_tile_generator(self, pyramid_tile: TileGenerator):
         grp = self.file.require_group(f'/{pyramid_tile.tile.z}/{pyramid_tile.tile.x}/{pyramid_tile.tile.y}')
         grp.create_dataset('row', (pyramid_tile.weights.nnz,), dtype='int32', data=pyramid_tile.weights.row)
         grp.create_dataset('col', (pyramid_tile.weights.nnz,), dtype='int32', data=pyramid_tile.weights.col)
@@ -192,13 +115,13 @@ class HDF5TileCubeStorage(TileCubeStorage):
         grp.attrs['shape_out'] = pyramid_tile.shape_out
         grp.attrs['bounds'] = pyramid_tile.bounds
 
-    def read_pyramid_tile(self, tile: Tile) -> PyramidTile or None:
+    def read_tile_generator(self, tile: Tile) -> TileGenerator or None:
         # Check pyramid index
         index_val = self.read_index(tile)
         if index_val is None or index_val is False:
             return None
         # Index indicates pyramid tile exists, check that it does
-        if self.check_pyramid_tile_exists(tile) is False:
+        if self.check_tile_generator_exists(tile) is False:
             return None
         # Read pyramid file from file
         grp = self.file[str(tile.z)][str(tile.x)][str(tile.y)]
@@ -211,9 +134,9 @@ class HDF5TileCubeStorage(TileCubeStorage):
         weights = scipy.sparse.coo_matrix(
             (S, (row, col)),
             shape=[shape_out[0] * shape_out[1], shape_in[0] * shape_in[1]])
-        return PyramidTile(tile, weights, bounds, shape_in, shape_out)
+        return TileGenerator(tile, weights, bounds, shape_in, shape_out)
 
-    def check_pyramid_tile_exists(self, tile: Tile) -> bool:
+    def check_tile_generator_exists(self, tile: Tile) -> bool:
         if f'/{tile.z}/{tile.x}/{tile.y}' in self.file:
             return True
         else:
