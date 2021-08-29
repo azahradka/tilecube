@@ -47,8 +47,7 @@ def test(time, z, x, y):
     else:
         ds_subset = ds.isel(time=time)['air'].sel({x_name: slice(pyramid_tile.xmin, pyramid_tile.xmax),
                             y_name: slice(pyramid_tile.ymax, pyramid_tile.ymin)})
-        ds_out = pyramid_tile.transform(ds_subset)
-        arr = ds_out.values
+        arr = pyramid_tile.transform(ds_subset.data)
         # print(arr)
         arr = np.flip(arr, axis=0)
     mask = np.isnan(arr)

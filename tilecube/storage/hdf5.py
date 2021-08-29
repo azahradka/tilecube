@@ -1,9 +1,10 @@
+import math
+
 import h5py
 import morecantile
 import numpy as np
 import pyproj
 import scipy
-import xarray as xr
 from morecantile import Tile
 
 import tilecube
@@ -13,10 +14,10 @@ from storage.base import TileCubeStorage
 
 class HDF5TileCubeStorage(TileCubeStorage):
 
-    def __init__(self, filename: str):
+    def __init__(self, filename: str, mode: str = 'a'):
         super().__init__()
         self.filename = filename
-        self.file: h5py.File = h5py.File(filename, 'r')
+        self.file: h5py.File = h5py.File(filename, mode)
 
     def write_pyramid_generator(self, pyramid_generator: PyramidGenerator):
         if 'src_x' in self.file:
@@ -50,15 +51,13 @@ class HDF5TileCubeStorage(TileCubeStorage):
         if 'src_x' not in self.file or 'src_y' not in self.file or 'pyramid_version' not in self.file.attrs:
             raise RuntimeError('The file does not contain a valid Pyramid')
         self._verify_version_compatibility(self.file.attrs['pyramid_version'])
-        src_x = xr.DataArray(self.file['src_x'])
-        src_y = xr.DataArray(self.file['src_y'])
         src_proj_json = self.file.attrs['src_proj']
         src_proj = pyproj.CRS.from_json(src_proj_json)
         # tile_proj_json = self.file.attrs['tile_proj']
         # tile_proj = pyproj.CRS.from_json(tile_proj_json)
         pyramid = PyramidGenerator(
-            src_x,
-            src_y,
+            self.file['src_x'],
+            self.file['src_y'],
             proj=src_proj)
         return pyramid
 
@@ -67,7 +66,7 @@ class HDF5TileCubeStorage(TileCubeStorage):
         if 'index' not in grp:
             grp.create_dataset(
                 'index',
-                shape=(self.index_lengths[str(tile.z)], self.index_lengths[str(tile.z)]),
+                shape=(self.index_lengths[tile.z], self.index_lengths[tile.z]),
                 dtype=np.int8,
                 fillvalue=-1)
         if value:
@@ -90,7 +89,7 @@ class HDF5TileCubeStorage(TileCubeStorage):
 
     def read_parent_index(self, tile) -> bool or None:
         if str(tile.z - 1) in self.file.keys():
-            parent_tile = morecantile.tms.get('WebMercatorQuad').parent(tile)
+            parent_tile = self._get_parent_tile(tile)
             return self.read_index(parent_tile)
 
     def write_method(self, tile, method):

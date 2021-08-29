@@ -1,4 +1,5 @@
 import abc
+import math
 
 import morecantile
 
@@ -11,6 +12,14 @@ class TileCubeStorage:
 
     def __init__(self):
         self.index_lengths = {z: 2**z for z in range(0, 19)}
+
+    @staticmethod
+    def _get_parent_tile(tile: morecantile.Tile):
+        parent_tile = morecantile.Tile(
+            math.floor(tile.x / 2),
+            math.floor(tile.y / 2),
+            tile.z - 1)
+        return parent_tile
 
     @abc.abstractmethod
     def write_pyramid_generator(self, pyramid_generator: PyramidGenerator):

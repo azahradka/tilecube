@@ -1,9 +1,10 @@
 import pyproj
-import xarray as xr
 import xesmf as xe
+import xesmf.smm
 import morecantile
 import numpy as np
 import scipy
+import scipy.sparse
 from morecantile import Tile, BoundingBox
 from shapely.geometry import Polygon
 
@@ -19,6 +20,15 @@ class TileGenerator:
         self.shape_in = shape_in
         self.shape_out = shape_out
         self.y_flipped = y_flipped
+
+    def to_dict(self) -> dict:
+        d = self.__dict__
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> 'TileGenerator':
+        tg = TileGenerator(**d)
+        return tg
 
     def transform(self, data: np.array):
         vals = data
@@ -116,6 +126,17 @@ class PyramidGenerator:
             self.src_bounds.top)
         # Resolution of the source grid, in whatever units the source grid projection is in.
         self.src_resolution = (self.src_bounds.right - self.src_bounds.left) / len(self.src_x)
+
+    def to_dict(self) -> dict:
+        return dict(
+            x=self.src_x,
+            y=self.src_y,
+            proj=self.src_proj.to_proj4())
+
+    @classmethod
+    def from_dict(cls, d: dict) -> 'PyramidGenerator':
+        proj = pyproj.CRS.from_proj4(d['proj'])
+        return PyramidGenerator(d['x'], d['y'], proj)
 
     @staticmethod
     def get_bounding_poly(xmin, ymin, xmax, ymax, transform=None):
