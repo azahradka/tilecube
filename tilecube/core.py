@@ -1,25 +1,11 @@
 from typing import List, Tuple
 
-import pyproj
 import numpy as np
+import pyproj
 from morecantile import Tile
 
-from generators import PyramidGenerator, TileGenerator
+from tilecube.generators import PyramidGenerator, TileGenerator
 from tilecube.storage import TileCubeStorage
-
-
-def load(storage: TileCubeStorage):
-    pyramid = storage.read_pyramid_generator()
-    tc = TileCube(pyramid, storage)
-    return tc
-
-
-def from_grid(x: np.array, y: np.array, proj: pyproj.CRS = None, storage: TileCubeStorage = None):
-    pyramid_generator = PyramidGenerator(x, y, proj)
-    tc = TileCube(pyramid_generator, storage)
-    if storage is not None:
-        storage.write_pyramid_generator(pyramid_generator)
-    return tc
 
 
 class TileCube:
@@ -34,6 +20,20 @@ class TileCube:
                 avoid persistence and operate on-the-fly.
 
     """
+
+    @staticmethod
+    def load(storage: TileCubeStorage):
+        pyramid = storage.read_pyramid_generator()
+        tc = TileCube(pyramid, storage)
+        return tc
+
+    @staticmethod
+    def from_grid(x: np.array, y: np.array, proj: pyproj.CRS = None, storage: TileCubeStorage = None):
+        pyramid_generator = PyramidGenerator(x, y, proj)
+        tc = TileCube(pyramid_generator, storage)
+        if storage is not None:
+            storage.write_pyramid_generator(pyramid_generator)
+        return tc
 
     def get_tile_generator(self, tile: Tile, method: str = None) -> TileGenerator or None:
         """ Read or calculate a TileGenerator.
@@ -94,19 +94,50 @@ class TileCube:
         self.storage.write_index(tile, True)
         self.storage.write_tile_generator(tile_generator)
 
+    @staticmethod
+    def _determine_zoom_level_tiles_to_calculate(z: int, parent_tile_indices: np.ndarray) -> List[Tile]:
+        """ Determine a list of the tiles to process for a given zoom level.
+
+        These are tiles which are likely to have a spatial intersection with the source data (ie the tile parent one
+        zoom level up had an intersection. If the parent tile index isn't calculated, assume there is an intersection.
+
+        :param z: Zoom level for which to calculate the list of tiles
+        :param parent_tile_indices: Array of the parent tile indices, if exists
+        :return: List of the tiles which are needed to be calculated at the given zoom level
+        """
+        # If we don't have a tile index for one zoom level up, we need to calculate all tiles
+        if parent_tile_indices is None:
+            tiles_to_process = []
+            for parent_y in range(2**z):
+                for parent_x in range(2**z):
+                    tiles_to_process.append(Tile(parent_x, parent_y, z))
+            return tiles_to_process
+        # If we have the parent tile index, make sure the shape of it is as expected
+        if parent_tile_indices.shape[0] != parent_tile_indices.shape[1]:
+            raise ValueError('`parent_tile_indices` array should be square')
+        if parent_tile_indices.shape[0] * 2 != 2**z:
+            raise ValueError(f'The shape of `parent_tile_indices` should be {2**z} for zoom level {z}, '
+                             f'not {parent_tile_indices.shape[0]}')
+        # We want to calculate tiles if the parent tile exists or is unknown
+        tile_indices = np.empty((parent_tile_indices.shape[0] * 2, parent_tile_indices.shape[1] * 2), np.int8)
+        tile_indices[::2, ::2] = parent_tile_indices
+        tile_indices[1::2, ::2] = parent_tile_indices
+        tile_indices[::2, 1::2] = parent_tile_indices
+        tile_indices[1::2, 1::2] = parent_tile_indices
+        needs_calculation = (tile_indices == 1) | (tile_indices == -1)
+        x = np.vstack([np.arange(tile_indices.shape[0])] * tile_indices.shape[1])
+        y = np.vstack([np.arange(tile_indices.shape[1])] * tile_indices.shape[0]).T
+        x_needs_calc = x[needs_calculation]
+        y_needs_calc = y[needs_calculation]
+        tiles = [Tile(x, y, z) for (x, y) in zip(x_needs_calc, y_needs_calc)]
+        return tiles
+
     def generate_pyramid_level(self, z: int, method: str, dask_client=None):
         if self.storage is None:
             raise RuntimeError('Cannot write TileGenerator when there is no storage object associated '
                                'with the TileCube')
-        tiles_to_process = []
-        for y in range(2**z):
-            for x in range(2**z):
-                tile = Tile(x, y, z)
-                # Check the tile index to see if the parent tile has been stored and did not intersect the source data grid.
-                # If so, then we know that the child tile won't either and we can short-circuit.
-                if self.storage.read_parent_index(tile) is False:
-                    continue
-                tiles_to_process.append(tile)
+        parent_tile_indices = self.storage.read_zoom_level_indices(z)
+        tiles_to_process = self._determine_zoom_level_tiles_to_calculate(z, parent_tile_indices)
         if len(tiles_to_process) == 0:
             return
         if dask_client is None:

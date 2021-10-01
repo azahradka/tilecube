@@ -4,26 +4,25 @@ import pyproj
 import pytest
 import scipy.sparse
 
-from generators import PyramidGenerator, TileGenerator
+from tilecube.generators import PyramidGenerator, TileGenerator
 
 
-@pytest.fixture
-def pg():
-    lon = np.arange(-120, 120, 0.4)
+def test_pyramid_init():
     lat = np.arange(-60, 60, 0.3)
-    pg = PyramidGenerator(lon, lat)
-    return pg
-
-
-def test_pyramid_init(pg):
+    lon = np.arange(-120, 120, 0.4)
+    pg = PyramidGenerator(lat, lon)
     assert pg.src_proj.equals(pyproj.CRS.from_epsg(4326))
-    assert pg.src_bounding_poly.geom_type == 'Polygon'
-    assert pytest.approx(pg.src_bounding_poly.bounds[0], -119.8)
-    assert pytest.approx(pg.src_bounding_poly.bounds[1], -59.85)
-    assert pytest.approx(pg.src_bounding_poly.bounds[2], 119.8)
-    assert pytest.approx(pg.src_bounding_poly.bounds[3], 59.85)
-    assert len(pg.src_bounding_poly.exterior.coords) == (256 * 4)
-    assert pytest.approx(pg.src_resolution, 0.599)
+    # TODO: expand
+
+
+def test_pyramid_init_2d_xy():
+    import xarray as xr
+    ds = xr.tutorial.open_dataset("rasm")
+    y = ds['yc']
+    x = ds['xc']
+    x = x - 180
+    pg = PyramidGenerator(y, x)
+
 
 @pytest.mark.parametrize('method', [
     "bilinear",
@@ -38,7 +37,7 @@ def test_pyramid_init(pg):
     (1, 0, 0),
     (2, 1, 1),
     (3, 1, 1)])
-def test_calculate_pyramid_tile(method, z, x, y):
+def test_calculate_tile_generator(method, z, x, y):
     # This test data originally came from the xarray tutorial dataset "air_temperature"
     # Regenerate using the below:
     #     ds = xr.tutorial.open_dataset("air_temperature").isel(time=0)
@@ -63,33 +62,33 @@ def test_calculate_pyramid_tile(method, z, x, y):
         "nearest_s2d_2_1_1": (22, 25),
         "nearest_d2s_2_1_1": (22, 25),
         "patch_2_1_1": (22, 25),
-        "bilinear_3_1_1": (5, 19),
-        "nearest_s2d_3_1_1": (5, 19),
-        "nearest_d2s_3_1_1": (5, 19),
-        "patch_3_1_1": (5, 19)}
+        "bilinear_3_1_1": (5, 20),
+        "nearest_s2d_3_1_1": (5, 20),
+        "nearest_d2s_3_1_1": (5, 20),
+        "patch_3_1_1": (5, 20)}
     tile = morecantile.Tile(x, y, z)
-    pyramid = PyramidGenerator(x_grid, y_grid)
+    pyramid = PyramidGenerator(y_grid, x_grid)
     ptile = pyramid.calculate_tile_generator(tile, method)
     assert ptile is not None
-    data_subset = data[np.ix_(
-        ((y_grid >= ptile.ymin) & (y_grid <= ptile.ymax)),
-         ((x_grid >= ptile.xmin) & (x_grid <= ptile.xmax)).reshape(-1)
-    )]
+    data_subset = data[ptile.ymin:ptile.ymax, ptile.xmin:ptile.xmax]
     assert data_subset.shape == expected_data_subset_dims[f'{method}_{z}_{x}_{y}']
     tile = ptile.transform(data_subset)
     np.testing.assert_array_equal(tile, expected_results)
-    # If things change, you may want to visually re-inspect the results and freeze the expected outputs using:
-    #     import matplotlib.pyplot as plt
-    #     plt.imshow(tile)
-    #     plt.show()
-    #     np.save(f'tests/test_data/expected_{method}_{z}_{x}_{y}', tile)
-    #     plt.close()
-    #     # Use this to write a temp file to generate the dict of expected dimensions, then copy to code
-    #     with open('tests/test_data/expected_data_subset_dims.txt', 'a') as f:
-    #         f.writelines(f'"{method}_{z}_{x}_{y}": {data_subset.shape},\n')
+    # # If things change, you may want to visually re-inspect the results and freeze the expected outputs using:
+    # import matplotlib.pyplot as plt
+    # plt.imshow(tile)
+    # plt.show()
+    # np.save(f'tests/test_data/expected_{method}_{z}_{x}_{y}', tile)
+    # plt.close()
+    # # Use this to write a temp file to generate the dict of expected dimensions, then copy to code
+    # with open('tests/test_data/expected_data_subset_dims.txt', 'a') as f:
+    #     f.writelines(f'"{method}_{z}_{x}_{y}": {data_subset.shape},\n')
 
 
-def test_pyramid_generator_to_from_dict(pg):
+def test_pyramid_generator_to_from_dict():
+    lon = np.arange(-120, 120, 0.4)
+    lat = np.arange(-60, 60, 0.3)
+    pg = PyramidGenerator(lat, lon)
     d = pg.to_dict()
     assert len(d) == 3
     assert d['proj'] == '+proj=longlat +datum=WGS84 +no_defs +type=crs'
@@ -100,7 +99,10 @@ def test_pyramid_generator_to_from_dict(pg):
     assert pg2.src_proj.to_proj4() == pg.src_proj.to_proj4()
 
 
-def test_tile_generator_to_from_dict(pg: PyramidGenerator):
+def test_tile_generator_to_from_dict():
+    lon = np.arange(-120, 120, 0.4)
+    lat = np.arange(-60, 60, 0.3)
+    pg = PyramidGenerator(lat, lon)
     tg = pg.calculate_tile_generator(morecantile.Tile(0, 0, 1), 'bilinear')
     d = tg.to_dict()
     assert isinstance(d, dict)
@@ -109,3 +111,64 @@ def test_tile_generator_to_from_dict(pg: PyramidGenerator):
     tg2 = TileGenerator.from_dict(d)
     assert isinstance(tg2, TileGenerator)
     assert isinstance(tg2.weights, scipy.sparse.coo_matrix)
+
+
+def test_yxgrid_to_table():
+    lat = [20, 40, 60]
+    lon = [-100, -50, 0, 50, 100]
+    lat_grid, lon_grid = np.meshgrid(lat, lon, indexing='ij')
+    iy, ix, yv, xv = PyramidGenerator._yxgrid_to_table(lat_grid, lon_grid)
+    iy_expected = [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2]
+    ix_expected = [0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 0, 1, 2, 3, 4]
+    yv_expected = np.array([20, 20, 20, 20, 20, 40, 40, 40, 40, 40, 60, 60, 60, 60, 60])
+    xv_expected = np.array([-100, -50, 0, 50, 100, -100, -50, 0, 50, 100, -100, -50, 0, 50, 100])
+    np.testing.assert_array_equal(iy, iy_expected)
+    np.testing.assert_array_equal(ix, ix_expected)
+    np.testing.assert_array_equal(yv, yv_expected)
+    np.testing.assert_array_equal(xv, xv_expected)
+
+
+def test_input_grid_to_2d_with_input_1d_grid():
+    lat = np.array([20, 40, 60])
+    lon = np.array([-100, -50, 0, 50, 100])
+    ygrid, xgrid = PyramidGenerator._input_grid_to_2d(lat, lon)
+    ygrid_expected = np.array([
+        [20, 20, 20, 20, 20],
+        [40, 40, 40, 40, 40],
+        [60, 60, 60, 60, 60],
+    ])
+    xgrid_expected = np.array([
+        [-100, -50, 0, 50, 100],
+        [-100, -50, 0, 50, 100],
+        [-100, -50, 0, 50, 100],
+    ])
+    np.testing.assert_array_equal(ygrid, ygrid_expected)
+    np.testing.assert_array_equal(xgrid, xgrid_expected)
+
+
+def test_input_grid_to_2d_with_input_2d_grid():
+    ygrid_expected = np.array([
+        [20, 20, 20, 20, 20],
+        [40, 40, 40, 40, 40],
+        [60, 60, 60, 60, 60],
+    ])
+    xgrid_expected = np.array([
+        [-100, -50, 0, 50, 100],
+        [-100, -50, 0, 50, 100],
+        [-100, -50, 0, 50, 100],
+    ])
+    ygrid, xgrid = PyramidGenerator._input_grid_to_2d(ygrid_expected, xgrid_expected)
+    np.testing.assert_array_equal(ygrid, ygrid_expected)
+    np.testing.assert_array_equal(xgrid, xgrid_expected)
+
+
+def test_input_grid_to_2d_with_input_invalid_grid():
+    lat = [20, 40, 60]
+    lon = [-100, -50, 0, 50, 100]
+    lat_grid, lon_grid = np.meshgrid(lat, lon, indexing='ij')
+    lon_grid_wrong_dim = lon_grid[:, :-2]
+    with pytest.raises(ValueError):
+        PyramidGenerator._input_grid_to_2d(lat_grid, lon_grid_wrong_dim)
+    lon_grid_wrong_number_dim = np.stack([lon_grid, lon_grid], axis=2)
+    with pytest.raises(ValueError):
+        PyramidGenerator._input_grid_to_2d(lat_grid, lon_grid_wrong_number_dim)

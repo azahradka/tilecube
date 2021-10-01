@@ -1,9 +1,9 @@
-import tempfile
 import os
+import tempfile
 
 import dask.distributed as dd
-import pytest
 import numpy as np
+import pytest
 from morecantile import Tile
 
 from tilecube.core import TileCube
@@ -20,10 +20,28 @@ def dask_client():
 
 @pytest.fixture
 def pg():
-    lon = np.arange(-120, 120, 0.4)
     lat = np.arange(-60, 60, 0.3)
-    pg = PyramidGenerator(lon, lat)
+    lon = np.arange(-120, 120, 0.4)
+    pg = PyramidGenerator(lat, lon)
     return pg
+
+
+def test_determine_zoom_level_tiles_to_calculate():
+    z = 2
+    parent_tile_indices = np.array([
+        [1, 1],
+        [0, -1]
+    ])
+    expected_tile_indices = [
+        (0, 0), (0, 1), (1, 0), (1, 1),
+        (2, 0), (2, 1), (3, 0), (3, 1),
+        (2, 2), (2, 3), (3, 2), (3, 3)
+    ]
+    expected_tiles = [Tile(x, y, z) for (x, y) in expected_tile_indices]
+    tiles = TileCube._determine_zoom_level_tiles_to_calculate(z, parent_tile_indices)
+    assert len(tiles) == len(expected_tiles)
+    for tile in tiles:
+        assert tile in expected_tiles
 
 
 def test_dask_worker_calculate_tile_generators_local(pg: PyramidGenerator):

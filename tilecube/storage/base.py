@@ -2,8 +2,9 @@ import abc
 import math
 
 import morecantile
+import numpy as np
 
-from generators import PyramidGenerator, TileGenerator
+from tilecube.generators import PyramidGenerator, TileGenerator
 
 
 class TileCubeStorage:
@@ -50,7 +51,7 @@ class TileCubeStorage:
     def read_parent_index(self, tile: morecantile.Tile) -> bool or None:
         """ Read the tile index to determine a a PyramidTile exists for the *parent* tile location.
 
-        The parent tile is the tile which encompasses the requesed tile location, at zoom level `tile.z - 1`
+        The parent tile is the tile which encompasses the requested tile location, at zoom level `tile.z - 1`
 
         Args:
             tile: ZXY Tile location
@@ -60,6 +61,25 @@ class TileCubeStorage:
 
         """
         pass
+
+    @abc.abstractmethod
+    def read_zoom_level_indices(self, z: int) -> np.ndarray or None:
+        """ Read the tile indices to determine which PyramidTiles exist for the given zoom level.
+
+        Args:
+            z: Zoom level
+
+        Returns: Array of tile indices storing the existence of each PyramidTile in the given zoom level
+            Array is Float32 with width and length equal to the number of tiles along x and y axis of the zoom level.
+              Values are:
+                1. if the PyramidTile exists
+                0. if the PyrimidTile does not exist (no intersection with source data)
+                -1. if the index for a PyramidTile is not initialized (tile has not been calculated)
+            `None` is returned if the index array for the given zoom level does not exist yet.
+
+        """
+        pass
+
 
     @abc.abstractmethod
     def write_method(self, tile: morecantile.Tile, method):

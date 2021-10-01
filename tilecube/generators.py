@@ -1,12 +1,15 @@
-import pyproj
-import xesmf as xe
-import xesmf.smm
+from typing import Tuple
+
 import morecantile
 import numpy as np
+import pyproj
 import scipy
 import scipy.sparse
-from morecantile import Tile, BoundingBox
-from shapely.geometry import Polygon
+from shapely import geometry
+import xesmf as xe
+import xesmf.smm
+from morecantile import Tile
+from shapely.strtree import STRtree
 
 
 class TileGenerator:
@@ -67,31 +70,60 @@ class PyramidGenerator:
 
     def __init__(
             self,
-            x: np.array,
             y: np.array,
+            x: np.array,
             proj: pyproj.CRS = None):
         """
+
+        A note on the order of the x and y axes: In geospatial applications, care must be given to the order in which
+        the x and y axes are presented. Unlike in general cartesian applications, the y axis, commonly represented by
+        degrees latitude, is often presented before the x axis.
 
         Args:
             x: array of the X coordinates of the source grid. Must be one dimensional (rectilinear).
             y: array of the Y coordinates of the source grid. Must be one dimensional (rectilinear).
             proj: Coordinate Reference System (CRS) of the source grid. Leave None to use Lat/Lon (EPSG:3857)
         """
-        if x.ndim != 1 or y.ndim != 1:
-            raise NotImplementedError("Grid must currently be rectilinear (1-d x and y)")
+        self.src_y = y
         self.src_x = x
-        # TODO comment
-        if y[0] > y[-1]:
-            self.y_flipped = True
-            self.src_y = y[::-1]
-        else:
-            self.y_flipped = False
-            self.src_y = y
+        self.ygrid, self.xgrid = self._input_grid_to_2d(y, x)
+        # There is no widely followed convention for the order of the y-axis in geospatial array datasets
+        # This corresponds to the 'spatial reference point' of the array being in the top left (y decreasing) or
+        # bottom left (y increasing). The convention for exporting png tiles from numpy is to have the reference point
+        # in the top left so we will make sure that convention is followed for all processing within the TileCube.
+        self.y_flipped, self.ygrid = self._correct_flipped_y_orientation(self.ygrid)
+
+        # Take the x and y coordinate grids and generate a table of the grid points:
+        #   x-axis index, y-axis index, x-coordinate, y-coordinate
+        # This table can then be used to filter the source grid points which fall within a given tile
+        self.iyv, self.ixv, self.yv, self.xv = self._yxgrid_to_table(self.ygrid, self.xgrid)
+        # Shapely geometries in the points table
+        self.xyv_points = [geometry.Point(x, y) for x, y in zip(self.xv, self.yv)]
+        # RTree spatial index of the points table
+        self.xyv_points_index = STRtree(self.xyv_points)
+        # Index of the RTree spatial index, used to lookup the points table index position based on RTree geometries
+        #   (This is needed because the RTree returns the geometries themselves, rather than the index positions of the
+        #   geometries)
+        self.xyv_points_index_ids = dict((id(pt), i) for i, pt in enumerate(self.xyv_points))
+
+
+
+        # # Bounding box of the grid points
+        # self.xy_grid_bounds = geometry.box(
+        #     np.min(self.xv),
+        #     np.min(self.yv),
+        #     np.max(self.xv),
+        #     np.max(self.yv)
+        # )
+
+
+
+
+        # Setup Projections
         if proj is None:
             self.src_proj = pyproj.CRS.from_epsg(4326)
         else:
             self.src_proj = proj
-
         # Tiles are in Web Mercator projection (EPSG:3857)
         self.tile_proj = pyproj.CRS.from_epsg(3857)
         self.tile_matrix_set = morecantile.tms.get('WebMercatorQuad')
@@ -102,7 +134,7 @@ class PyramidGenerator:
         # If the source data is already in lat/lon, we can skip this reprojection
         if self.src_proj.equals(self.lonlat_proj):
             self.src_lonlat_tranformer = None
-            if self.src_x.min() < -180 or self.src_x.max() > 180:
+            if self.src_x[1].min() < -180 or self.src_x[1].max() > 180:
                 raise ValueError('The supplied Longitude (x) values must be in the range of -180 <= x <= 180')
         else:
             self.src_lonlat_tranformer = pyproj.Transformer.from_crs(
@@ -110,48 +142,78 @@ class PyramidGenerator:
         self.tile_src_transformer = pyproj.Transformer.from_crs(
             self.tile_proj, self.src_proj, always_xy=True)
 
-        # We need the bounds of the data to determine if a given tile intersects the data.
-        # This intersection is done in the source grid projection so the resolution of the source grid bounding poly
-        # doesn't really matter.
-        # TODO: does this work well when source is in a rectilinear grid?
-        self.src_bounds = BoundingBox(
-            float(self.src_x.min()),
-            float(self.src_y.min()),
-            float(self.src_x.max()),
-            float(self.src_y.max()))
-        self.src_bounding_poly = self.get_bounding_poly(
-            self.src_bounds.left,
-            self.src_bounds.bottom,
-            self.src_bounds.right,
-            self.src_bounds.top)
-        # Resolution of the source grid, in whatever units the source grid projection is in.
-        self.src_resolution = (self.src_bounds.right - self.src_bounds.left) / len(self.src_x)
+    @staticmethod
+    def _correct_flipped_y_orientation(ygrid):
+        if ygrid[-1, 0] > ygrid[0, 0]:
+            y_flipped = True
+            corrected_ygrid = ygrid[::-1, :]
+        else:
+            y_flipped = False
+            corrected_ygrid = ygrid
+        return y_flipped, corrected_ygrid
+
+    @staticmethod
+    def _input_grid_to_2d(y, x):
+        """ If x and y are 1-dimensional vectors, generate 2-d x and y coordinate grids """
+        if y.ndim == 1 and x.ndim == 1:
+            ygrid, xgrid = np.meshgrid(y, x, indexing='ij')
+        elif y.ndim == 2 and x.ndim == 2 :
+            if y.shape != x.shape:
+                raise ValueError('x and y must have matching dimensions')
+            ygrid = y
+            xgrid = x
+        else:
+            raise ValueError('x and y must be one or two dimensional')
+        return ygrid, xgrid
+
+    @staticmethod
+    def _yxgrid_to_table(y, x) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """ Convert input x, y grid into a table of index, coordinate rows
+
+        Args:
+            x: 2D array of x coordinates
+            y: 2D array of y coordinates
+
+        Returns: four numpy arrays of equal length, containing:
+            1. x-axis index position
+            2. y-axis index position
+            3. x coordinate value
+            4. y coordinate value
+
+        """
+        iy = np.repeat(np.arange(y.shape[0]), y.shape[1])
+        ix = np.hstack([np.arange(x.shape[1])] * x.shape[0])
+        yv = np.ravel(y)
+        xv = np.ravel(x)
+        return iy, ix, yv, xv
 
     def to_dict(self) -> dict:
         return dict(
-            x=self.src_x,
             y=self.src_y,
+            x=self.src_x,
             proj=self.src_proj.to_proj4())
 
     @classmethod
     def from_dict(cls, d: dict) -> 'PyramidGenerator':
         proj = pyproj.CRS.from_proj4(d['proj'])
-        return PyramidGenerator(d['x'], d['y'], proj)
+        return PyramidGenerator(d['y'], d['x'], proj)
 
     @staticmethod
-    def get_bounding_poly(xmin, ymin, xmax, ymax, transform=None):
-        """ Create a `shapely.Polygon` bounding box from bounding box corners for a grid of data.
+    def bbox_to_poly(xmin, ymin, xmax, ymax, transform=None) -> geometry.Polygon:
+        """ Create a `shapely.Polygon` bounding box from standard bounding box corners.
 
         Optionally, reproject the bounding polygon. The bounding polygon is created with 256 vertices along each axis.
+        (256 because that is the number of grid points along an axis of a standard web map tile.
 
         Args:
-            xmin:
-            ymin:
-            xmax:
-            ymax:
-            transform:
+            xmin: x-coordinate of the lower left corner of the bounding box
+            ymin: y-coordinate of the lower left corner of the bounding box
+            xmax: x-coordinate of the upper right corner of the bounding box
+            ymax: y-coordinate of the upper right corner of the bounding box
+            transform: optional transformation function to apply to the bounding box polygon coordinates
+                This is generally a `pyproj.Transformer` transformation function.
 
-        Returns:
+        Returns: The (optionally reprojected) polygon bounding box
 
         """
         # Vectors from x/y min to max, with 256 vertices
@@ -181,7 +243,7 @@ class PyramidGenerator:
         if transform is not None:
             x, y = transform(x, y)
         # Create `shapely.Polygon` object from the coordinate vectors
-        polygon = Polygon(zip(x, y))
+        polygon = geometry.Polygon(zip(x, y))
         return polygon
 
     def calculate_tile_generator(self, tile: Tile, method) -> TileGenerator or None:
@@ -207,39 +269,63 @@ class PyramidGenerator:
 
         # Create a bounding box for the web map tile, in the source grid projection
         tile_bounds = self.tile_matrix_set.xy_bounds(tile)
-        tile_bounding_poly = self.get_bounding_poly(
+        tile_bounding_poly = self.bbox_to_poly(
             tile_bounds.left,
             tile_bounds.bottom,
             tile_bounds.right,
             tile_bounds.top,
             self.tile_src_transformer.transform)
-        # Determine area of the source grid which intersects the current tile (still in source grid projection)
-        clipped_data_bounding_poly = self.src_bounding_poly.intersection(tile_bounding_poly)
-        # If no part of the source grid intersects the current tile then there is nothing else to calculate
-        if clipped_data_bounding_poly.is_empty:
-            return None
 
-        # Create grid of source coordinates which intersect the current tile, in lat/long
-        # Start by selecting the region of the source grid which is within the current tile bounds
-        #   But, include an additional grid point on each side because we need to have the first data point outside a
-        #   given tile domain for some regridding algorithms to work (e.g. "conservative").
-        xmin, ymin, xmax, ymax = clipped_data_bounding_poly.bounds
-        x = self.src_x[np.where(
-            (self.src_x >= (xmin - self.src_resolution))
-            & (self.src_x <= (xmax + self.src_resolution)))]
-        y = self.src_y[np.where(
-            (self.src_y >= (ymin - self.src_resolution))
-            & (self.src_y <= (ymax + self.src_resolution)))]
-        src_xgrid, src_ygrid = np.meshgrid(x, y)
-        # Confirm we have data in the source grids
-        if 0 in src_xgrid.shape:
-            return None
-        # Reproject the source data grid for the current tile into lat/lon
-        # If the source data is already in lat/lon, we can skip this reprojection
-        if self.src_lonlat_tranformer is None:
-            src_longrid, src_latgrid = src_xgrid, src_ygrid
+        # Select grid of source coordinates which intersect the current tile and then reproject to lat/long
+        # Include an additional grid point on each side because we need to have the first data point outside a
+        # given tile domain for some regridding algorithms to work (e.g. "conservative").
+                # mask: np.ndarray = shapely.vectorized.contains(tile_bounding_poly, self.xv, self.yv)
+        intersecting_points = self.xyv_points_index.query(tile_bounding_poly)
+        intersecting_points_ids = [self.xyv_points_index_ids[id(pt)] for pt in intersecting_points]
+
+        if len(intersecting_points) > 0:
+            # Select the min/max index values for the x and y coordinate axes.
+            # If possible, take one additional index position below/above the min/max, respectively.
+            # Note that ix_max and iy_max have an addition +1 to make the endpoint inclusive during numpy
+            #   endpoint-exclusive slicing
+            ix_min = max(np.min(self.ixv[intersecting_points_ids]) - 1, np.min(self.ixv))
+            ix_max = min(np.max(self.ixv[intersecting_points_ids]) + 1, np.max(self.ixv)) + 1
+            iy_min = max(np.min(self.iyv[intersecting_points_ids]) - 1, np.min(self.iyv))
+            iy_max = min(np.max(self.iyv[intersecting_points_ids]) + 1, np.max(self.iyv)) + 1
+            src_ygrid_subset = self.ygrid[iy_min:iy_max, ix_min:ix_max]
+            src_xgrid_subset = self.xgrid[iy_min:iy_max, ix_min:ix_max]
         else:
-            src_longrid, src_latgrid = self.src_lonlat_tranformer.transform(src_xgrid, src_ygrid)
+            # If there are no intersecting points, this could be because:
+            #   1. The tile bounds do not intersect the source data
+            #   2. The tile bounds intersect the source data, but do not contain any of the grid points
+            # First, find the nearest grid point to the tile boundary, then buffer one point out in each direction.
+            # If this grid region contains the tile, then this is the relevant grid region for regridding.
+            # If the grid region doesn't contain the tile, then the tile bounds are outside the source grid extent.
+            # Note that ix_max and iy_max have an addition +1 to make the endpoint inclusive during numpy
+            #   endpoint-exclusive slicing
+            nearest_point = self.xyv_points_index.nearest(tile_bounding_poly)
+            nearest_point_id = self.xyv_points_index_ids[id(nearest_point)]
+            ix_min = max(self.ixv[nearest_point_id] - 1, np.min(self.ixv))
+            ix_max = min(self.ixv[nearest_point_id] + 1, np.max(self.ixv)) + 1
+            iy_min = max(self.iyv[nearest_point_id] - 1, np.min(self.iyv))
+            iy_max = min(self.iyv[nearest_point_id] + 1, np.max(self.iyv)) + 1
+            src_ygrid_subset = self.ygrid[iy_min:iy_max, ix_min:ix_max]
+            src_xgrid_subset = self.xgrid[iy_min:iy_max, ix_min:ix_max]
+            grid_subset_bbox = geometry.box(
+                np.min(src_xgrid_subset),
+                np.min(src_ygrid_subset),
+                np.max(src_xgrid_subset),
+                np.max(src_ygrid_subset)
+            )
+            if not grid_subset_bbox.intersects(tile_bounding_poly):
+                return None
+
+        # Take the portion of the source grid which is relevant for the current tile and reproject it to
+        # lat/lon (WGS84) (if it's not already) because the regridding will be done in lat/lon.
+        if self.src_lonlat_tranformer is None:
+            src_longrid_subset, src_latgrid_subset = src_xgrid_subset, src_ygrid_subset
+        else:
+            src_longrid_subset, src_latgrid_subset = self.src_lonlat_tranformer.transform(src_xgrid_subset, src_ygrid_subset)
 
         # Create grid of tile coordinates in lat/long
         # Note that `half_grid_width` is compensated for because the tile bounds are reported to the exterior edge of
@@ -256,17 +342,13 @@ class PyramidGenerator:
         tile_longrid, tile_latgrid = self.tile_lonlat_transformer.transform(tile_xgrid, tile_ygrid)
 
         # Generate `xesmf.Regridder` from source grid to tile grid
-        print('Calculating regridder')
-        regridder = xe.Regridder({'lon': src_longrid, 'lat': src_latgrid},
+        regridder = xe.Regridder({'lon': src_longrid_subset, 'lat': src_latgrid_subset},
                                  {'lon': tile_longrid, 'lat': tile_latgrid}, method)
-        print('Done.')
-
         X = regridder.weights
         M = scipy.sparse.csr_matrix(X)
         num_nonzeros = np.diff(M.indptr)
         M[num_nonzeros == 0, 0] = np.NaN
         regridder.weights = scipy.sparse.coo_matrix(M)
-        bounds = (x.min(), y.min(), x.max(), y.max())
+        bounds = (ix_min, iy_min, ix_max, iy_max)
         pyramid_tile = TileGenerator(tile, regridder.weights, bounds, regridder.shape_in, regridder.shape_out, self.y_flipped)
         return pyramid_tile
-

@@ -1,15 +1,12 @@
-import math
-
 import h5py
-import morecantile
 import numpy as np
 import pyproj
 import scipy
 from morecantile import Tile
 
 import tilecube
-from generators import PyramidGenerator, TileGenerator
-from storage.base import TileCubeStorage
+from tilecube.generators import PyramidGenerator, TileGenerator
+from tilecube.storage.base import TileCubeStorage
 
 
 class HDF5TileCubeStorage(TileCubeStorage):
@@ -91,6 +88,12 @@ class HDF5TileCubeStorage(TileCubeStorage):
         if str(tile.z - 1) in self.file.keys():
             parent_tile = self._get_parent_tile(tile)
             return self.read_index(parent_tile)
+
+    def read_zoom_level_indices(self, z: int) -> np.ndarray or None:
+        if f'/{z}/index' not in self.file:
+            return None
+        indices = self.file[str(z)]['index']
+        return indices
 
     def write_method(self, tile, method):
         grp = self.file.require_group(f'/{tile.z}')
