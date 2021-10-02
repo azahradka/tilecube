@@ -4,12 +4,12 @@ import math
 import morecantile
 import numpy as np
 
-from tilecube.generators import PyramidGenerator, TileGenerator
+from tilecube.core import TilerFactory, Tiler
 
 
 class TileCubeStorage:
 
-    min_pyramid_version = '0.0.1'
+    min_tilecube_version = '0.0.1'
 
     def __init__(self):
         self.index_lengths = {z: 2**z for z in range(0, 19)}
@@ -23,11 +23,11 @@ class TileCubeStorage:
         return parent_tile
 
     @abc.abstractmethod
-    def write_pyramid_generator(self, pyramid_generator: PyramidGenerator):
+    def write_tiler_factory(self, tiler_factory: TilerFactory):
         pass
 
     @abc.abstractmethod
-    def read_pyramid_generator(self) -> PyramidGenerator:
+    def read_tiler_factory(self) -> TilerFactory:
         pass
 
     @abc.abstractmethod
@@ -36,12 +36,12 @@ class TileCubeStorage:
 
     @abc.abstractmethod
     def read_index(self, tile: morecantile.Tile) -> bool or None:
-        """ Read the tile index to determine a a PyramidTile exists for the given Tile location.
+        """ Read the tile index to determine a a Tiler exists for the given Tile location.
 
         Args:
             tile: ZXY Tile location
 
-        Returns: True if the PyramidTile exists, False if it does not.
+        Returns: True if the Tiler exists, False if it does not.
             None if the index is not initialized.
 
         """
@@ -49,14 +49,14 @@ class TileCubeStorage:
 
     @abc.abstractmethod
     def read_parent_index(self, tile: morecantile.Tile) -> bool or None:
-        """ Read the tile index to determine a a PyramidTile exists for the *parent* tile location.
+        """ Read the tile index to determine a Tiler exists for the *parent* tile location.
 
         The parent tile is the tile which encompasses the requested tile location, at zoom level `tile.z - 1`
 
         Args:
             tile: ZXY Tile location
 
-        Returns: True if the PyramidTile exists, False if it does not.
+        Returns: True if the Tiler exists, False if it does not.
             None if the index is not initialized.
 
         """
@@ -64,17 +64,17 @@ class TileCubeStorage:
 
     @abc.abstractmethod
     def read_zoom_level_indices(self, z: int) -> np.ndarray or None:
-        """ Read the tile indices to determine which PyramidTiles exist for the given zoom level.
+        """ Read the tile indices to determine which Tilers exist for the given zoom level.
 
         Args:
             z: Zoom level
 
-        Returns: Array of tile indices storing the existence of each PyramidTile in the given zoom level
+        Returns: Array of tile indices storing the existence of each Tiler in the given zoom level
             Array is Float32 with width and length equal to the number of tiles along x and y axis of the zoom level.
               Values are:
-                1. if the PyramidTile exists
+                1. if the Tiler exists
                 0. if the PyrimidTile does not exist (no intersection with source data)
-                -1. if the index for a PyramidTile is not initialized (tile has not been calculated)
+                -1. if the index for a Tiler is not initialized (tile has not been calculated)
             `None` is returned if the index array for the given zoom level does not exist yet.
 
         """
@@ -90,21 +90,21 @@ class TileCubeStorage:
         pass
 
     @abc.abstractmethod
-    def write_tile_generator(self, tile_generator: 'TileGenerator'):
+    def write_tiler(self, tile_generator: 'Tiler'):
         pass
 
     @abc.abstractmethod
-    def read_tile_generator(self, tile: morecantile.Tile) -> 'TileGenerator' or None:
-        """ Read pyramid file from disk.
+    def read_tiler(self, tile: morecantile.Tile) -> 'Tiler' or None:
+        """ Read tile_factory file from disk.
 
         Args:
             tile: ZXY Tile location
 
-        Returns: The requested `PyramidTile`. `None` if it does not exist.
+        Returns: The requested `Tiler`. `None` if it does not exist.
 
         """
         pass
 
     @abc.abstractmethod
-    def check_tile_generator_exists(self, tile: morecantile.Tile) -> bool:
+    def check_tiler_exists(self, tile: morecantile.Tile) -> bool:
         pass

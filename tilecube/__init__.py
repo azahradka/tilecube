@@ -1,4 +1,4 @@
-from .core import TileCube
+from .tilecube import TileCube
 
 from . import storage
 

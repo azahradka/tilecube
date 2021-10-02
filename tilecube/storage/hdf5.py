@@ -5,7 +5,7 @@ import scipy
 from morecantile import Tile
 
 import tilecube
-from tilecube.generators import PyramidGenerator, TileGenerator
+from tilecube.core import TilerFactory, Tiler
 from tilecube.storage.base import TileCubeStorage
 
 
@@ -16,47 +16,47 @@ class HDF5TileCubeStorage(TileCubeStorage):
         self.filename = filename
         self.file: h5py.File = h5py.File(filename, mode)
 
-    def write_pyramid_generator(self, pyramid_generator: PyramidGenerator):
+    def write_tiler_factory(self, tiler_factory: TilerFactory):
         if 'src_x' in self.file:
             del self.file['src_x']
         if 'src_y' in self.file:
             del self.file['src_y']
-        x_ds = self.file.create_dataset('src_x', (len(pyramid_generator.src_x)), pyramid_generator.src_x.dtype)
-        y_ds = self.file.create_dataset('src_y', (len(pyramid_generator.src_y)), pyramid_generator.src_y.dtype)
-        x_ds[:] = pyramid_generator.src_x.values
-        y_ds[:] = pyramid_generator.src_y.values
+        x_ds = self.file.create_dataset('src_x', (len(tiler_factory.src_x)), tiler_factory.src_x.dtype)
+        y_ds = self.file.create_dataset('src_y', (len(tiler_factory.src_y)), tiler_factory.src_y.dtype)
+        x_ds[:] = tiler_factory.src_x.values
+        y_ds[:] = tiler_factory.src_y.values
 
-        self.file.attrs['src_proj'] = pyramid_generator.src_proj.to_json()
-        self.file.attrs['tile_proj'] = pyramid_generator.tile_proj.to_json()
+        self.file.attrs['src_proj'] = tiler_factory.src_proj.to_json()
+        self.file.attrs['tile_proj'] = tiler_factory.tile_proj.to_json()
 
-        self.file.attrs['pyramid_version'] = tilecube.__version__
+        self.file.attrs['tilecube_version'] = tilecube.__version__
 
     def _verify_version_compatibility(self, version):
         v = [int(v) for v in version.split('.')]
-        mv = [int(v) for v in self.min_pyramid_version.split('.')]
+        mv = [int(v) for v in self.min_tilecube_version.split('.')]
         if len(v) != 3:
             raise RuntimeError(f'The file was written with an invalid version string: {version}.')
         if ((v[0] < mv[0])
                 or (v[0] < mv[0] and v[1] < mv[1])
                 or (v[0] < mv[0] and v[1] < mv[1] and v[2] < v[2])):
-            raise RuntimeError(f'The pyramid file was was written with version {version} but the minimum'
-                               f'version which can be read is {self.min_pyramid_version}. Re-pyramid the '
+            raise RuntimeError(f'The tile_factory file was was written with version {version} but the minimum'
+                               f'version which can be read is {self.min_tilecube_version}. Re-tile_factory the '
                                f'file to proceed.')
 
-    def read_pyramid_generator(self) -> PyramidGenerator:
+    def read_tiler_factory(self) -> TilerFactory:
         # TODO add y_flipped
-        if 'src_x' not in self.file or 'src_y' not in self.file or 'pyramid_version' not in self.file.attrs:
-            raise RuntimeError('The file does not contain a valid Pyramid')
-        self._verify_version_compatibility(self.file.attrs['pyramid_version'])
+        if 'src_x' not in self.file or 'src_y' not in self.file or 'tilecube_version' not in self.file.attrs:
+            raise RuntimeError('The file does not contain a valid TileCube')
+        self._verify_version_compatibility(self.file.attrs['tilecube_version'])
         src_proj_json = self.file.attrs['src_proj']
         src_proj = pyproj.CRS.from_json(src_proj_json)
         # tile_proj_json = self.file.attrs['tile_proj']
         # tile_proj = pyproj.CRS.from_json(tile_proj_json)
-        pyramid = PyramidGenerator(
+        tiler_factory = TilerFactory(
             self.file['src_x'],
             self.file['src_y'],
             proj=src_proj)
-        return pyramid
+        return tiler_factory
 
     def write_index(self, tile: Tile, value: bool):
         grp = self.file.require_group(f'/{tile.z}')
@@ -108,24 +108,24 @@ class HDF5TileCubeStorage(TileCubeStorage):
         else:
             return None
 
-    def write_tile_generator(self, pyramid_tile: TileGenerator):
-        grp = self.file.require_group(f'/{pyramid_tile.tile.z}/{pyramid_tile.tile.x}/{pyramid_tile.tile.y}')
-        grp.create_dataset('row', (pyramid_tile.weights.nnz,), dtype='int32', data=pyramid_tile.weights.row)
-        grp.create_dataset('col', (pyramid_tile.weights.nnz,), dtype='int32', data=pyramid_tile.weights.col)
-        grp.create_dataset('S', (pyramid_tile.weights.nnz,), dtype=pyramid_tile.weights.dtype, data=pyramid_tile.weights.data)
-        grp.attrs['shape_in'] = pyramid_tile.shape_in
-        grp.attrs['shape_out'] = pyramid_tile.shape_out
-        grp.attrs['bounds'] = pyramid_tile.bounds
+    def write_tiler(self, tiler: Tiler):
+        grp = self.file.require_group(f'/{tiler.tile.z}/{tiler.tile.x}/{tiler.tile.y}')
+        grp.create_dataset('row', (tiler.weights.nnz,), dtype='int32', data=tiler.weights.row)
+        grp.create_dataset('col', (tiler.weights.nnz,), dtype='int32', data=tiler.weights.col)
+        grp.create_dataset('S', (tiler.weights.nnz,), dtype=tiler.weights.dtype, data=tiler.weights.data)
+        grp.attrs['shape_in'] = tiler.shape_in
+        grp.attrs['shape_out'] = tiler.shape_out
+        grp.attrs['bounds'] = tiler.bounds
 
-    def read_tile_generator(self, tile: Tile) -> TileGenerator or None:
-        # Check pyramid index
+    def read_tiler(self, tile: Tile) -> Tiler or None:
+        # Check tile_factory index
         index_val = self.read_index(tile)
         if index_val is None or index_val is False:
             return None
-        # Index indicates pyramid tile exists, check that it does
-        if self.check_tile_generator_exists(tile) is False:
+        # Index indicates tile_factory tile exists, check that it does
+        if self.check_tiler_exists(tile) is False:
             return None
-        # Read pyramid file from file
+        # Read tile_factory file from file
         grp = self.file[str(tile.z)][str(tile.x)][str(tile.y)]
         row = grp['row'][:]
         col = grp['col'][:]
@@ -136,9 +136,9 @@ class HDF5TileCubeStorage(TileCubeStorage):
         weights = scipy.sparse.coo_matrix(
             (S, (row, col)),
             shape=[shape_out[0] * shape_out[1], shape_in[0] * shape_in[1]])
-        return TileGenerator(tile, weights, bounds, shape_in, shape_out)
+        return Tiler(tile, weights, bounds, shape_in, shape_out)
 
-    def check_tile_generator_exists(self, tile: Tile) -> bool:
+    def check_tiler_exists(self, tile: Tile) -> bool:
         if f'/{tile.z}/{tile.x}/{tile.y}' in self.file:
             return True
         else:

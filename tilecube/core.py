@@ -1,196 +1,338 @@
-from typing import List, Tuple
+from typing import Tuple
 
+import morecantile
 import numpy as np
 import pyproj
+import scipy
+import scipy.sparse
+from shapely import geometry
+import xesmf as xe
+import xesmf.smm
 from morecantile import Tile
-
-from tilecube.generators import PyramidGenerator, TileGenerator
-from tilecube.storage import TileCubeStorage
+from shapely.strtree import STRtree
 
 
-class TileCube:
-
-    def __init__(self, pyramid_generator: PyramidGenerator, storage: TileCubeStorage = None):
-        self.pyramid_generator = pyramid_generator
-        self.storage = storage
-        self.tiles = dict()
-    """
-    
-    storage: `PyramidStorage` object to use to persist the regridding weights and metadata. Leave None to
-                avoid persistence and operate on-the-fly.
+class Tiler:
+    """ Transforms source data into a given web map grid
 
     """
+    def __init__(self, tile: Tile, weights, bounds, shape_in, shape_out, y_flipped=False):
+        self.tile = tile
+        self.weights = weights
+        self.bounds = bounds
+        self.shape_in = shape_in
+        self.shape_out = shape_out
+        self.y_flipped = y_flipped
 
-    @staticmethod
-    def load(storage: TileCubeStorage):
-        pyramid = storage.read_pyramid_generator()
-        tc = TileCube(pyramid, storage)
-        return tc
+    def to_dict(self) -> dict:
+        d = self.__dict__
+        return d
 
-    @staticmethod
-    def from_grid(x: np.array, y: np.array, proj: pyproj.CRS = None, storage: TileCubeStorage = None):
-        pyramid_generator = PyramidGenerator(x, y, proj)
-        tc = TileCube(pyramid_generator, storage)
-        if storage is not None:
-            storage.write_pyramid_generator(pyramid_generator)
-        return tc
+    @classmethod
+    def from_dict(cls, d: dict) -> 'Tiler':
+        tiler = Tiler(**d)
+        return tiler
 
-    def get_tile_generator(self, tile: Tile, method: str = None) -> TileGenerator or None:
-        """ Read or calculate a TileGenerator.
+    def transform(self, data: np.array):
+        vals = data
+        if self.y_flipped:
+            vals = vals[::-1, :]
+        data_out = xe.smm.apply_weights(self.weights, vals, self.shape_in, self.shape_out)
+        return data_out
 
-        * If the pyramid tile exists in storage it is read out and returned.
-        * If the pyramid tile does not exist in storage but can be calculated, it is calculated and returned.
-        * If the pyramid tile cannot be calculated because there is no overlap between the data and tile,
-            then None is returned.
+    @property
+    def xmin(self):
+        return self.bounds[0]
+
+    @property
+    def ymin(self):
+        return self.bounds[1]
+
+    @property
+    def xmax(self):
+        return self.bounds[2]
+
+    @property
+    def ymax(self):
+        return self.bounds[3]
+
+
+class TilerFactory:
+    """ Generates `Tiler` objects for any zoom, x, y tile location based on the source data grid
+
+    """
+
+    # 256x256 is the standard web map tile size (pixels). Could make adjustable in the future.
+    TILESIZE = 256
+
+    def __init__(
+            self,
+            y: np.array,
+            x: np.array,
+            proj: pyproj.CRS = None):
+        """
+
+        A note on the order of the x and y axes: In geospatial applications, care must be given to the order in which
+        the x and y axes are presented. Unlike in general cartesian applications, the y axis, commonly represented by
+        degrees latitude, is often presented before the x axis.
 
         Args:
-            tile:
-            method:
-
-        Returns: the requested PyramidTile. None if there is no overlap between the data and `tile`.
-
+            x: array of the X coordinates of the source grid. Must be one dimensional (rectilinear).
+            y: array of the Y coordinates of the source grid. Must be one dimensional (rectilinear).
+            proj: Coordinate Reference System (CRS) of the source grid. Leave None to use Lat/Lon (EPSG:3857)
         """
-        if self.storage is not None:
-            # Check to see if we already have already used an interpolation method for this zoom level.
-            # If so make sure we are being consistent and using the same one
-            existing_method = self.storage.read_method(tile)
-            if existing_method is not None and existing_method != method:
-                raise ValueError(f'Cannot create pyramid tile using interpolation method {method}'
-                                 f'when existing tiles at zoom level {tile.z} have been created'
-                                 f'using interpolation method {existing_method}.')
+        self.src_y = y
+        self.src_x = x
+        self.ygrid, self.xgrid = self._input_grid_to_2d(y, x)
+        # There is no widely followed convention for the order of the y-axis in geospatial array datasets
+        # This corresponds to the 'spatial reference point' of the array being in the top left (y decreasing) or
+        # bottom left (y increasing). The convention for exporting png tiles from numpy is to have the reference point
+        # in the top left so we will make sure that convention is followed for all processing within the TileCube.
+        self.y_flipped, self.ygrid = self._correct_flipped_y_orientation(self.ygrid)
+
+        # Take the x and y coordinate grids and generate a table of the grid points:
+        #   x-axis index, y-axis index, x-coordinate, y-coordinate
+        # This table can then be used to filter the source grid points which fall within a given tile
+        self.iyv, self.ixv, self.yv, self.xv = self._yxgrid_to_table(self.ygrid, self.xgrid)
+        # Shapely geometries in the points table
+        self.xyv_points = [geometry.Point(x, y) for x, y in zip(self.xv, self.yv)]
+        # RTree spatial index of the points table
+        self.xyv_points_index = STRtree(self.xyv_points)
+        # Index of the RTree spatial index, used to lookup the points table index position based on RTree geometries
+        #   (This is needed because the RTree returns the geometries themselves, rather than the index positions of the
+        #   geometries)
+        self.xyv_points_index_ids = dict((id(pt), i) for i, pt in enumerate(self.xyv_points))
+
+        # Setup Projections
+        if proj is None:
+            self.src_proj = pyproj.CRS.from_epsg(4326)
         else:
-            if method is None:
-                raise ValueError('Method must be supplied when there is no storage object available to the '
-                                 'PyramidGenerator')
-
-        if self.storage is not None:
-            # Check the tile index to see if the parent tile has been stored and did not intersect the source data grid.
-            # If so, then we know that the child tile won't either and we can short-circuit.
-            if self.storage.read_parent_index(tile) is False:
-                return None
-            # Check the tile index to see if the current tile has been stored and did not intersect the source data grid.
-            # If so, then we can short-circuit.
-            tile_index = self.storage.read_index(tile)
-            if tile_index is False:
-                return None
-            # Check the tile index to see if the current tile has been stored and is available. If so, we can reuse it.
-            elif tile_index is True:
-                tg = self.storage.read_tile_generator(tile)
-                return tg
-
-        # The tile needs to be generated
-        tg = self.pyramid_generator.calculate_tile_generator(tile, method)
-
-    def write_tile_generator(self, tile: Tile, tile_generator: TileGenerator):
-        if self.storage is None:
-            raise RuntimeError('Cannot write TileGenerator when there is no storage object associated '
-                               'with the TileCube')
-        # There was no intersect between the source grid and this tile, so set the tile index to False
-        if tile_generator is None:
-            self.storage.write_index(tile, False)
-            return
-        # We were able to calculate a tile generator for this tile, so set the tile index to True and write the
-        # tile generator to storage.
-        self.storage.write_index(tile, True)
-        self.storage.write_tile_generator(tile_generator)
+            self.src_proj = proj
+        # Tiles are in Web Mercator projection (EPSG:3857)
+        self.tile_proj = pyproj.CRS.from_epsg(3857)
+        self.tile_matrix_set = morecantile.tms.get('WebMercatorQuad')
+        # We use WGS84 Lat/Lon (EPSG:4326) as an intermediary
+        self.lonlat_proj = pyproj.CRS.from_epsg(4326)
+        self.tile_lonlat_transformer = pyproj.Transformer.from_crs(
+            self.tile_proj, self.lonlat_proj, always_xy=True)
+        # If the source data is already in lat/lon, we can skip this reprojection
+        if self.src_proj.equals(self.lonlat_proj):
+            self.src_lonlat_tranformer = None
+            if self.src_x[1].min() < -180 or self.src_x[1].max() > 180:
+                raise ValueError('The supplied Longitude (x) values must be in the range of -180 <= x <= 180')
+        else:
+            self.src_lonlat_tranformer = pyproj.Transformer.from_crs(
+                self.src_proj, self.lonlat_proj, always_xy=True)
+        self.tile_src_transformer = pyproj.Transformer.from_crs(
+            self.tile_proj, self.src_proj, always_xy=True)
 
     @staticmethod
-    def _determine_zoom_level_tiles_to_calculate(z: int, parent_tile_indices: np.ndarray) -> List[Tile]:
-        """ Determine a list of the tiles to process for a given zoom level.
-
-        These are tiles which are likely to have a spatial intersection with the source data (ie the tile parent one
-        zoom level up had an intersection. If the parent tile index isn't calculated, assume there is an intersection.
-
-        :param z: Zoom level for which to calculate the list of tiles
-        :param parent_tile_indices: Array of the parent tile indices, if exists
-        :return: List of the tiles which are needed to be calculated at the given zoom level
-        """
-        # If we don't have a tile index for one zoom level up, we need to calculate all tiles
-        if parent_tile_indices is None:
-            tiles_to_process = []
-            for parent_y in range(2**z):
-                for parent_x in range(2**z):
-                    tiles_to_process.append(Tile(parent_x, parent_y, z))
-            return tiles_to_process
-        # If we have the parent tile index, make sure the shape of it is as expected
-        if parent_tile_indices.shape[0] != parent_tile_indices.shape[1]:
-            raise ValueError('`parent_tile_indices` array should be square')
-        if parent_tile_indices.shape[0] * 2 != 2**z:
-            raise ValueError(f'The shape of `parent_tile_indices` should be {2**z} for zoom level {z}, '
-                             f'not {parent_tile_indices.shape[0]}')
-        # We want to calculate tiles if the parent tile exists or is unknown
-        tile_indices = np.empty((parent_tile_indices.shape[0] * 2, parent_tile_indices.shape[1] * 2), np.int8)
-        tile_indices[::2, ::2] = parent_tile_indices
-        tile_indices[1::2, ::2] = parent_tile_indices
-        tile_indices[::2, 1::2] = parent_tile_indices
-        tile_indices[1::2, 1::2] = parent_tile_indices
-        needs_calculation = (tile_indices == 1) | (tile_indices == -1)
-        x = np.vstack([np.arange(tile_indices.shape[0])] * tile_indices.shape[1])
-        y = np.vstack([np.arange(tile_indices.shape[1])] * tile_indices.shape[0]).T
-        x_needs_calc = x[needs_calculation]
-        y_needs_calc = y[needs_calculation]
-        tiles = [Tile(x, y, z) for (x, y) in zip(x_needs_calc, y_needs_calc)]
-        return tiles
-
-    def generate_pyramid_level(self, z: int, method: str, dask_client=None):
-        if self.storage is None:
-            raise RuntimeError('Cannot write TileGenerator when there is no storage object associated '
-                               'with the TileCube')
-        parent_tile_indices = self.storage.read_zoom_level_indices(z)
-        tiles_to_process = self._determine_zoom_level_tiles_to_calculate(z, parent_tile_indices)
-        if len(tiles_to_process) == 0:
-            return
-        if dask_client is None:
-            for tile in tiles_to_process:
-                tile_generator = self.pyramid_generator.calculate_tile_generator(tile, method)
-                self.write_tile_generator(tile, tile_generator)
+    def _correct_flipped_y_orientation(ygrid):
+        if ygrid[-1, 0] > ygrid[0, 0]:
+            y_flipped = True
+            corrected_ygrid = ygrid[::-1, :]
         else:
-            # Test the calculation of the first tile locally, to make debugging of potential issues easier
-            tile0 = tiles_to_process.pop(0)
-            tile_generator0 = self.pyramid_generator.calculate_tile_generator(tile0, method)
-            self.write_tile_generator(tile0, tile_generator0)
-            tile_generators = self._calculate_tile_generators_distributed(tiles_to_process, method, dask_client)
-            for tile, tile_generator in tile_generators:
-                self.write_tile_generator(tile, tile_generator)
-
-    def _calculate_tile_generators_distributed(
-            self,
-            tiles: List[Tile],
-            method,
-            dask_client
-    ) -> List[Tuple[Tile, TileGenerator or None]]:
-        tile_tuples = [(t.x, t.y, t.z) for t in tiles]
-        pg_dict = self.pyramid_generator.to_dict()
-        future = dask_client.submit(
-            TileCube._dask_worker_calculate_tile_generators,
-            tiles=tile_tuples,
-            pyramid_generator=pg_dict,
-            method=method)
-        results = future.result()
-        tile_generators = []
-        for tile_index, tg_dict in results:
-            tile = Tile(*tile_index)
-            if tg_dict is not None:
-                tg = TileGenerator.from_dict(tg_dict)
-            else:
-                tg = None
-            tile_generators.append((tile, tg))
-        return tile_generators
+            y_flipped = False
+            corrected_ygrid = ygrid
+        return y_flipped, corrected_ygrid
 
     @staticmethod
-    def _dask_worker_calculate_tile_generators(
-            tiles: List[Tuple[int, int, int]],
-            pyramid_generator: dict,
-            method: str
-    ) -> List[Tuple[Tuple[int, int, int], dict or None]]:
-        pg = PyramidGenerator.from_dict(pyramid_generator)
-        tile_generators = []
-        for (x, y, z) in tiles:
-            tile = Tile(x, y, z)
-            tg = pg.calculate_tile_generator(tile, method)
-            if tg is not None:
-                tg_dict = tg.to_dict()
-            else:
-                tg_dict = None
-            tile_generators.append(((x, y, z), tg_dict))
-        return tile_generators
+    def _input_grid_to_2d(y, x):
+        """ If x and y are 1-dimensional vectors, generate 2-d x and y coordinate grids """
+        if y.ndim == 1 and x.ndim == 1:
+            ygrid, xgrid = np.meshgrid(y, x, indexing='ij')
+        elif y.ndim == 2 and x.ndim == 2 :
+            if y.shape != x.shape:
+                raise ValueError('x and y must have matching dimensions')
+            ygrid = y
+            xgrid = x
+        else:
+            raise ValueError('x and y must be one or two dimensional')
+        return ygrid, xgrid
+
+    @staticmethod
+    def _yxgrid_to_table(y, x) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """ Convert input x, y grid into a table of index, coordinate rows
+
+        Args:
+            x: 2D array of x coordinates
+            y: 2D array of y coordinates
+
+        Returns: four numpy arrays of equal length, containing:
+            1. x-axis index position
+            2. y-axis index position
+            3. x coordinate value
+            4. y coordinate value
+
+        """
+        iy = np.repeat(np.arange(y.shape[0]), y.shape[1])
+        ix = np.hstack([np.arange(x.shape[1])] * x.shape[0])
+        yv = np.ravel(y)
+        xv = np.ravel(x)
+        return iy, ix, yv, xv
+
+    def to_dict(self) -> dict:
+        return dict(
+            y=self.src_y,
+            x=self.src_x,
+            proj=self.src_proj.to_proj4())
+
+    @classmethod
+    def from_dict(cls, d: dict) -> 'TilerFactory':
+        proj = pyproj.CRS.from_proj4(d['proj'])
+        return TilerFactory(d['y'], d['x'], proj)
+
+    @staticmethod
+    def _bbox_to_poly(xmin, ymin, xmax, ymax, transform=None) -> geometry.Polygon:
+        """ Create a `shapely.Polygon` bounding box from standard bounding box corners.
+
+        Optionally, reproject the bounding polygon. The bounding polygon is created with 256 vertices along each axis.
+        (256 because that is the number of grid points along an axis of a standard web map tile.
+
+        Args:
+            xmin: x-coordinate of the lower left corner of the bounding box
+            ymin: y-coordinate of the lower left corner of the bounding box
+            xmax: x-coordinate of the upper right corner of the bounding box
+            ymax: y-coordinate of the upper right corner of the bounding box
+            transform: optional transformation function to apply to the bounding box polygon coordinates
+                This is generally a `pyproj.Transformer` transformation function.
+
+        Returns: The (optionally reprojected) polygon bounding box
+
+        """
+        # Vectors from x/y min to max, with 256 vertices
+        tile_xvector = np.linspace(xmin, xmax, num=TilerFactory.TILESIZE)
+        tile_yvector = np.linspace(ymin, ymax, num=TilerFactory.TILESIZE)
+        # x coordinate vector is generated by concatenating:
+        #   1. 256 coordinates of xmin ("left" side of rectangle)
+        #   2. 256 coordinates evenly spaced from xmin to xmax ("top" of rectangle)
+        #   3. 256 coordinates of xmax("right" side of rectangle)
+        #   4. 256 coordinates evenly spaced from xmax to xmin ("bottom" of rectangle)
+        x = np.concatenate([
+            np.array([xmin] * TilerFactory.TILESIZE),
+            tile_xvector,
+            np.array([xmax] * TilerFactory.TILESIZE),
+            tile_xvector[::-1]])
+        # y coordinate vector is generated by concatenating:
+        #   1. 256 coordinates evenly spaced from ymin to ymax ("left" side of rectangle)
+        #   2. 256 coordinates of ymax ("top" of rectangle)
+        #   3. 256 coordinates evenly spaced from ymax to ymin ("right" side of rectangle)
+        #   4. 256 coordinates of ymin ("bottom" of rectangle)
+        y = np.concatenate([
+            tile_yvector,
+            np.array([ymax] * TilerFactory.TILESIZE),
+            tile_yvector[::-1],
+            np.array([ymin] * TilerFactory.TILESIZE)])
+        # Reproject the polygon coordinates if necessary
+        if transform is not None:
+            x, y = transform(x, y)
+        # Create `shapely.Polygon` object from the coordinate vectors
+        polygon = geometry.Polygon(zip(x, y))
+        return polygon
+
+    def generate_tiler(self, tile: Tile, method) -> Tiler or None:
+        """
+
+        Args:
+            tile: The xyz web map tile to generate
+            method: The xESMF regridding algorithm to use
+                One of:
+                    ["bilinear",
+                    "conservative",
+                    "nearest_s2d",
+                    "nearest_d2s",
+                    "patch"]
+                See https://pangeo-xesmf.readthedocs.io/en/latest/notebooks/Compare_algorithms.html for details
+
+        Returns: The generated Tiler for the requested xyz tile index
+            None if there is no intersection of the source data with the given tile
+            The Tiler includes the tranformation matrix to reproject and regrid the source dataset to the given
+                web map tile.
+
+        """
+
+        # Create a bounding box for the web map tile, in the source grid projection
+        tile_bounds = self.tile_matrix_set.xy_bounds(tile)
+        tile_bounding_poly = self._bbox_to_poly(
+            tile_bounds.left,
+            tile_bounds.bottom,
+            tile_bounds.right,
+            tile_bounds.top,
+            self.tile_src_transformer.transform)
+
+        # Select grid of source coordinates which intersect the current tile and then reproject to lat/long
+        # Include an additional grid point on each side because we need to have the first data point outside a
+        # given tile domain for some regridding algorithms to work (e.g. "conservative").
+                # mask: np.ndarray = shapely.vectorized.contains(tile_bounding_poly, self.xv, self.yv)
+        intersecting_points = self.xyv_points_index.query(tile_bounding_poly)
+        intersecting_points_ids = [self.xyv_points_index_ids[id(pt)] for pt in intersecting_points]
+
+        if len(intersecting_points) > 0:
+            # Select the min/max index values for the x and y coordinate axes.
+            # If possible, take one additional index position below/above the min/max, respectively.
+            # Note that ix_max and iy_max have an addition +1 to make the endpoint inclusive during numpy
+            #   endpoint-exclusive slicing
+            ix_min = max(np.min(self.ixv[intersecting_points_ids]) - 1, np.min(self.ixv))
+            ix_max = min(np.max(self.ixv[intersecting_points_ids]) + 1, np.max(self.ixv)) + 1
+            iy_min = max(np.min(self.iyv[intersecting_points_ids]) - 1, np.min(self.iyv))
+            iy_max = min(np.max(self.iyv[intersecting_points_ids]) + 1, np.max(self.iyv)) + 1
+            src_ygrid_subset = self.ygrid[iy_min:iy_max, ix_min:ix_max]
+            src_xgrid_subset = self.xgrid[iy_min:iy_max, ix_min:ix_max]
+        else:
+            # If there are no intersecting points, this could be because:
+            #   1. The tile bounds do not intersect the source data
+            #   2. The tile bounds intersect the source data, but do not contain any of the grid points
+            # First, find the nearest grid point to the tile boundary, then buffer one point out in each direction.
+            # If this grid region contains the tile, then this is the relevant grid region for regridding.
+            # If the grid region doesn't contain the tile, then the tile bounds are outside the source grid extent.
+            # Note that ix_max and iy_max have an addition +1 to make the endpoint inclusive during numpy
+            #   endpoint-exclusive slicing
+            nearest_point = self.xyv_points_index.nearest(tile_bounding_poly)
+            nearest_point_id = self.xyv_points_index_ids[id(nearest_point)]
+            ix_min = max(self.ixv[nearest_point_id] - 1, np.min(self.ixv))
+            ix_max = min(self.ixv[nearest_point_id] + 1, np.max(self.ixv)) + 1
+            iy_min = max(self.iyv[nearest_point_id] - 1, np.min(self.iyv))
+            iy_max = min(self.iyv[nearest_point_id] + 1, np.max(self.iyv)) + 1
+            src_ygrid_subset = self.ygrid[iy_min:iy_max, ix_min:ix_max]
+            src_xgrid_subset = self.xgrid[iy_min:iy_max, ix_min:ix_max]
+            grid_subset_bbox = geometry.box(
+                np.min(src_xgrid_subset),
+                np.min(src_ygrid_subset),
+                np.max(src_xgrid_subset),
+                np.max(src_ygrid_subset)
+            )
+            if not grid_subset_bbox.intersects(tile_bounding_poly):
+                return None
+
+        # Take the portion of the source grid which is relevant for the current tile and reproject it to
+        # lat/lon (WGS84) (if it's not already) because the regridding will be done in lat/lon.
+        if self.src_lonlat_tranformer is None:
+            src_longrid_subset, src_latgrid_subset = src_xgrid_subset, src_ygrid_subset
+        else:
+            src_longrid_subset, src_latgrid_subset = self.src_lonlat_tranformer.transform(src_xgrid_subset, src_ygrid_subset)
+
+        # Create grid of tile coordinates in lat/long
+        # Note that `half_grid_width` is compensated for because the tile bounds are reported to the exterior edge of
+        #   the tile grid cells, while the grid coordinates are referenced to the center of each grid cell.
+        tile_bounds = self.tile_matrix_set.xy_bounds(tile)
+        half_grid_width = ((tile_bounds.top - tile_bounds.bottom) / self.TILESIZE) / 2
+        tile_yvector = np.linspace(
+            tile_bounds.bottom + half_grid_width, tile_bounds.top - half_grid_width,
+            num=self.TILESIZE)
+        tile_xvector = np.linspace(
+            tile_bounds.left + half_grid_width, tile_bounds.right - half_grid_width,
+            num=self.TILESIZE)
+        tile_xgrid, tile_ygrid = np.meshgrid(tile_xvector, tile_yvector)
+        tile_longrid, tile_latgrid = self.tile_lonlat_transformer.transform(tile_xgrid, tile_ygrid)
+
+        # Generate `xesmf.Regridder` from source grid to tile grid
+        regridder = xe.Regridder({'lon': src_longrid_subset, 'lat': src_latgrid_subset},
+                                 {'lon': tile_longrid, 'lat': tile_latgrid}, method)
+        X = regridder.weights
+        M = scipy.sparse.csr_matrix(X)
+        num_nonzeros = np.diff(M.indptr)
+        M[num_nonzeros == 0, 0] = np.NaN
+        regridder.weights = scipy.sparse.coo_matrix(M)
+        bounds = (ix_min, iy_min, ix_max, iy_max)
+        tiler = Tiler(tile, regridder.weights, bounds, regridder.shape_in, regridder.shape_out, self.y_flipped)
+        return tiler

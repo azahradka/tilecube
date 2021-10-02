@@ -9,7 +9,7 @@ import xarray as xr
 from PIL import Image
 from flask import Flask, send_file
 
-from generators import PyramidGenerator
+from core import TilerFactory
 
 app = Flask(__name__)
 ds = xr.tutorial.open_dataset("air_temperature")
@@ -31,7 +31,7 @@ bounds = np.linspace(start=float(da.min()), stop=float(da.max()), num=6)
 norm = mpl.colors.BoundaryNorm(bounds, cmap.N)
 
 src_pyproj = None # CRS.from_proj4('+ellps=WGS84 +proj=stere +lat_0=90 +lon_0=252.0 +x_0=0.0 +y_0=0.0 +lat_ts=60 +no_defs')
-pyramid = PyramidGenerator(da[y_name], da[x_name], src_pyproj)
+tile_factory = TilerFactory(da[y_name], da[x_name], src_pyproj)
 
 
 @app.route('/')
@@ -47,13 +47,13 @@ def test(time, z, x, y):
     else:
         method = 'bilinear'
 
-    pyramid_tile = pyramid.calculate_tile_generator(tile, method)  # TODO variable methods
-    if pyramid_tile is None:
-        arr = np.empty((PyramidGenerator.TILESIZE, PyramidGenerator.TILESIZE))
+    tiler = tile_factory.generate_tiler(tile, method)  # TODO variable methods
+    if tiler is None:
+        arr = np.empty((TilerFactory.TILESIZE, TilerFactory.TILESIZE))
         arr[:] = np.nan
     else:
-        ds_subset = ds.isel(time=time)[da_name][pyramid_tile.ymin:pyramid_tile.ymax, pyramid_tile.xmin:pyramid_tile.xmax]
-        arr = pyramid_tile.transform(ds_subset.data)
+        ds_subset = ds.isel(time=time)[da_name][tiler.ymin:tiler.ymax, tiler.xmin:tiler.xmax]
+        arr = tiler.transform(ds_subset.data)
         # print(arr)
         arr = np.flip(arr, axis=0)
     mask = np.isnan(arr)
