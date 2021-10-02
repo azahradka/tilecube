@@ -9,8 +9,8 @@ from tilecube.core import TilerFactory, Tiler
 from tilecube.storage import TileCubeStorage
 
 
-def from_grid(x: np.array, y: np.array, proj: pyproj.CRS = None, storage: TileCubeStorage = None):
-    tiler_factory = TilerFactory(x, y, proj)
+def from_grid(y: np.array, x: np.array, proj: pyproj.CRS = None, storage: TileCubeStorage = None):
+    tiler_factory = TilerFactory(y, x, proj)
     tc = TileCube(tiler_factory, storage)
     if storage is not None:
         storage.write_tiler_factory(tiler_factory)
