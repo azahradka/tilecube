@@ -1,39 +1,42 @@
-from typing import List, Tuple
+from typing import List
 
 import numpy as np
 import pyproj
 from morecantile import Tile
 
+from tilecube import distributed
 from tilecube.core import TilerFactory, Tiler
 from tilecube.storage import TileCubeStorage
+
+
+def from_grid(x: np.array, y: np.array, proj: pyproj.CRS = None, storage: TileCubeStorage = None):
+    tiler_factory = TilerFactory(x, y, proj)
+    tc = TileCube(tiler_factory, storage)
+    if storage is not None:
+        storage.write_tiler_factory(tiler_factory)
+    return tc
+
+
+def load(storage: TileCubeStorage):
+    tiler_factory = storage.read_tiler_factory()
+    tc = TileCube(tiler_factory, storage)
+    return tc
 
 
 class TileCube:
 
     def __init__(self, tiler_factory: TilerFactory, storage: TileCubeStorage = None):
+        """ Initialize a `TileCube` from a raw `core.tiler_factory` object
+
+        Most use cases are better served by creating using `tilecube.from_grid`
+
+        tiler_factory:
+        storage: `TileCubeStorage` object to use to persist the regridding weights and metadata. Leave None to
+                    avoid persistence and operate on-the-fly.
+
+        """
         self.tiler_factory = tiler_factory
         self.storage = storage
-        self.tiles = dict()
-    """
-    
-    storage: `TileCubeStorage` object to use to persist the regridding weights and metadata. Leave None to
-                avoid persistence and operate on-the-fly.
-
-    """
-
-    @staticmethod
-    def load(storage: TileCubeStorage):
-        tiler_factory = storage.read_tiler_factory()
-        tc = TileCube(tiler_factory, storage)
-        return tc
-
-    @staticmethod
-    def from_grid(x: np.array, y: np.array, proj: pyproj.CRS = None, storage: TileCubeStorage = None):
-        tiler_factory = TilerFactory(x, y, proj)
-        tc = TileCube(tiler_factory, storage)
-        if storage is not None:
-            storage.write_tiler_factory(tiler_factory)
-        return tc
 
     def get_tiler(self, tile: Tile, method: str = None) -> Tiler or None:
         """ Read or calculate a Tiler.
@@ -71,28 +74,28 @@ class TileCube:
             # Check the tile index to see if the current tile has been stored and did not intersect the source data grid.
             # If so, then we can short-circuit.
             tile_index = self.storage.read_index(tile)
-            if tile_index is False:
-                return None
-            # Check the tile index to see if the current tile has been stored and is available. If so, we can reuse it.
-            elif tile_index is True:
+            if tile_index is True:
                 tiler = self.storage.read_tiler(tile)
-                return tiler
-
-        # The tile needs to be generated
-        tiler = self.tiler_factory.generate_tiler(tile, method)
+            # Check the tile index to see if the current tile has been stored and is available. If so, we can reuse it.
+            else:
+                return None
+        else:
+            # The tile needs to be generated
+            tiler = self.tiler_factory.generate_tiler(tile, method)
+        return tiler
 
     def write_tiler(self, tile: Tile, tiler: Tiler):
         if self.storage is None:
             raise RuntimeError('Cannot write Tiler when there is no storage object associated '
                                'with the TileCube')
-        # There was no intersect between the source grid and this tile, so set the tile index to False
         if tiler is None:
+            # There was no intersect between the source grid and this tile, so set the tile index to False
             self.storage.write_index(tile, False)
-            return
-        # We were able to calculate a tile generator for this tile, so set the tile index to True and write the
-        # tile generator to storage.
-        self.storage.write_index(tile, True)
-        self.storage.write_tiler(tiler)
+        else:
+            # We were able to calculate a tile generator for this tile, so set the tile index to True and write the
+            # tile generator to storage.
+            self.storage.write_index(tile, True)
+            self.storage.write_tiler(tiler)
 
     @staticmethod
     def _determine_zoom_level_tiles_to_calculate(z: int, parent_tile_indices: np.ndarray) -> List[Tile]:
@@ -133,8 +136,25 @@ class TileCube:
         return tiles
 
     def generate_zoom_level_tilers(self, z: int, method: str, dask_client=None):
+        """ Generate and save `Tiler` objects for all possible tiles at a given zoom level
+
+        Attempt to calculate and save to storage a `Tiler` object for all 2**Z tiles at a given web map zoom level.
+        For high zoom levels this might take a very long time and use a large amount of storage, It is recommended to
+        start with a low zoom level and gradually increase the zoom level.
+
+        If you have `dask.distributed` installed, you can optionally pass a Dask `Client` object to perform the calculations in
+        parallel using all available cores on a local machine or Dask cluster. Operation is not threadsafe.
+
+        Args:
+            z: Zoom level (>=0) to calculate `Tiles` for
+            method:
+            dask_client:
+
+        Returns:
+
+        """
         if self.storage is None:
-            raise RuntimeError('Cannot write Tiler when there is no storage object associated '
+            raise RuntimeError('Cannot write Tilers when there is no storage object associated '
                                'with the TileCube')
         parent_tile_indices = self.storage.read_zoom_level_indices(z)
         tiles_to_process = self._determine_zoom_level_tiles_to_calculate(z, parent_tile_indices)
@@ -149,48 +169,6 @@ class TileCube:
             tile0 = tiles_to_process.pop(0)
             tiler0 = self.tiler_factory.generate_tiler(tile0, method)
             self.write_tiler(tile0, tiler0)
-            tilers = self._calculate_tilers_distributed(tiles_to_process, method, dask_client)
+            tilers = distributed.calculate_tilers_distributed(self.tiler_factory, tiles_to_process, method, dask_client)
             for tile, tiler in tilers:
                 self.write_tiler(tile, tiler)
-
-    def _calculate_tilers_distributed(
-            self,
-            tiles: List[Tile],
-            method,
-            dask_client
-    ) -> List[Tuple[Tile, Tiler or None]]:
-        tile_tuples = [(t.x, t.y, t.z) for t in tiles]
-        tiler_factory_dict = self.tiler_factory.to_dict()
-        future = dask_client.submit(
-            TileCube._dask_worker_calculate_tilers,
-            tiles=tile_tuples,
-            tiler_factory_dict=tiler_factory_dict,
-            method=method)
-        results = future.result()
-        tilers = []
-        for tile_index, tg_dict in results:
-            tile = Tile(*tile_index)
-            if tg_dict is not None:
-                tg = Tiler.from_dict(tg_dict)
-            else:
-                tg = None
-            tilers.append((tile, tg))
-        return tilers
-
-    @staticmethod
-    def _dask_worker_calculate_tilers(
-            tiles: List[Tuple[int, int, int]],
-            tiler_factory_dict: dict,
-            method: str
-    ) -> List[Tuple[Tuple[int, int, int], dict or None]]:
-        tiler_factory = TilerFactory.from_dict(tiler_factory_dict)
-        tilers = []
-        for (x, y, z) in tiles:
-            tile = Tile(x, y, z)
-            tiler = tiler_factory.generate_tiler(tile, method)
-            if tiler is not None:
-                tiler_dict = tiler.to_dict()
-            else:
-                tiler_dict = None
-            tilers.append(((x, y, z), tiler_dict))
-        return tilers

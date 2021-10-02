@@ -5,10 +5,10 @@ import numpy as np
 import pyproj
 import scipy
 import scipy.sparse
-from shapely import geometry
 import xesmf as xe
 import xesmf.smm
 from morecantile import Tile
+from shapely import geometry
 from shapely.strtree import STRtree
 
 
@@ -33,7 +33,7 @@ class Tiler:
         tiler = Tiler(**d)
         return tiler
 
-    def transform(self, data: np.array):
+    def regrid(self, data: np.array):
         vals = data
         if self.y_flipped:
             vals = vals[::-1, :]
@@ -74,12 +74,17 @@ class TilerFactory:
 
         A note on the order of the x and y axes: In geospatial applications, care must be given to the order in which
         the x and y axes are presented. Unlike in general cartesian applications, the y axis, commonly represented by
-        degrees latitude, is often presented before the x axis.
+        degrees latitude, is often presented before the x axis
+        (http://cfconventions.org/Data/cf-conventions/cf-conventions-1.8/cf-conventions.html#dimensions). Within the
+        TileCube project, the axis-order for data and coordinates is y, then x. This applies both to the order in which the
+        coordinate variables are passed, and the order in which the data and 2-d coordinate arrays are indexed.
 
         Args:
-            x: array of the X coordinates of the source grid. Must be one dimensional (rectilinear).
-            y: array of the Y coordinates of the source grid. Must be one dimensional (rectilinear).
-            proj: Coordinate Reference System (CRS) of the source grid. Leave None to use Lat/Lon (EPSG:3857)
+            x: array of the X coordinates of the source grid. Can be one dimensional for rectilinear grids or two
+                dimensional for general curvilinear grids. Two dimensional grids must have axis order (y, x).
+            y: array of the Y coordinates of the source grid. Can be one dimensional for rectilinear grids or two
+                dimensional for general curvilinear grids. Two dimensional grids must have axis order (y, x).
+            proj: Coordinate Reference System (CRS) of the source grid. Defaults to Lat/Lon (EPSG:3857)
         """
         self.src_y = y
         self.src_x = x
@@ -171,17 +176,6 @@ class TilerFactory:
         xv = np.ravel(x)
         return iy, ix, yv, xv
 
-    def to_dict(self) -> dict:
-        return dict(
-            y=self.src_y,
-            x=self.src_x,
-            proj=self.src_proj.to_proj4())
-
-    @classmethod
-    def from_dict(cls, d: dict) -> 'TilerFactory':
-        proj = pyproj.CRS.from_proj4(d['proj'])
-        return TilerFactory(d['y'], d['x'], proj)
-
     @staticmethod
     def _bbox_to_poly(xmin, ymin, xmax, ymax, transform=None) -> geometry.Polygon:
         """ Create a `shapely.Polygon` bounding box from standard bounding box corners.
@@ -229,6 +223,18 @@ class TilerFactory:
         # Create `shapely.Polygon` object from the coordinate vectors
         polygon = geometry.Polygon(zip(x, y))
         return polygon
+
+    def to_dict(self) -> dict:
+        proj = self.src_proj.to_proj4()
+        return dict(
+            y=self.src_y,
+            x=self.src_x,
+            proj=proj)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> 'TilerFactory':
+        proj = pyproj.CRS.from_proj4(d['proj'])
+        return TilerFactory(d['y'], d['x'], proj)
 
     def generate_tiler(self, tile: Tile, method) -> Tiler or None:
         """
@@ -334,5 +340,11 @@ class TilerFactory:
         M[num_nonzeros == 0, 0] = np.NaN
         regridder.weights = scipy.sparse.coo_matrix(M)
         bounds = (ix_min, iy_min, ix_max, iy_max)
-        tiler = Tiler(tile, regridder.weights, bounds, regridder.shape_in, regridder.shape_out, self.y_flipped)
+        tiler = Tiler(
+            tile,
+            regridder.weights,
+            bounds,
+            regridder.shape_in,
+            regridder.shape_out,
+            self.y_flipped)
         return tiler

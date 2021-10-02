@@ -72,7 +72,7 @@ def test_calculate_tiler(method, z, x, y):
     assert tiler is not None
     data_subset = data[tiler.ymin:tiler.ymax, tiler.xmin:tiler.xmax]
     assert data_subset.shape == expected_data_subset_dims[f'{method}_{z}_{x}_{y}']
-    tile = tiler.transform(data_subset)
+    tile = tiler.regrid(data_subset)
     np.testing.assert_array_equal(tile, expected_results)
     # # If things change, you may want to visually re-inspect the results and freeze the expected outputs using:
     # import matplotlib.pyplot as plt

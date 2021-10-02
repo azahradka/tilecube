@@ -53,7 +53,7 @@ def test(time, z, x, y):
         arr[:] = np.nan
     else:
         ds_subset = ds.isel(time=time)[da_name][tiler.ymin:tiler.ymax, tiler.xmin:tiler.xmax]
-        arr = tiler.transform(ds_subset.data)
+        arr = tiler.regrid(ds_subset.data)
         # print(arr)
         arr = np.flip(arr, axis=0)
     mask = np.isnan(arr)
