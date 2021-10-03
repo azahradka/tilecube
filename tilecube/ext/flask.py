@@ -14,7 +14,7 @@ import tilecube
 
 def tilemap(
     tilecube: tilecube.TileCube,
-    method: str = 'bilinear',
+    method: str,
     cmap: t.Union[matplotlib.colors.Colormap, str] = None,
     norm: t.Callable = None,
 ) -> t.Callable:

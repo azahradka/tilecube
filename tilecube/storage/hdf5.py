@@ -16,13 +16,19 @@ class HDF5TileCubeStorage(TileCubeStorage):
         self.filename = filename
         self.file: h5py.File = h5py.File(filename, mode)
 
+    def __repr__(self):
+        super_str = super().__repr__()
+        s = f'HDF5TileCubeStorage referencing: {self.filename}\n'
+        s += super_str
+        return s
+
     def write_tiler_factory(self, tiler_factory: TilerFactory):
         if 'src_x' in self.file:
             del self.file['src_x']
         if 'src_y' in self.file:
             del self.file['src_y']
-        x_ds = self.file.create_dataset('src_x', (len(tiler_factory.src_x)), tiler_factory.src_x.dtype)
-        y_ds = self.file.create_dataset('src_y', (len(tiler_factory.src_y)), tiler_factory.src_y.dtype)
+        x_ds = self.file.create_dataset('src_x', tiler_factory.src_x.shape, tiler_factory.src_x.dtype)
+        y_ds = self.file.create_dataset('src_y', tiler_factory.src_y.shape, tiler_factory.src_y.dtype)
         x_ds[:] = tiler_factory.src_x.values
         y_ds[:] = tiler_factory.src_y.values
 
@@ -63,7 +69,7 @@ class HDF5TileCubeStorage(TileCubeStorage):
         if 'index' not in grp:
             grp.create_dataset(
                 'index',
-                shape=(self.index_lengths[tile.z], self.index_lengths[tile.z]),
+                shape=(self.INDEX_LENGTHS[tile.z], self.INDEX_LENGTHS[tile.z]),
                 dtype=np.int8,
                 fillvalue=-1)
         if value:

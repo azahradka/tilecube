@@ -11,9 +11,9 @@ from tilecube.storage import TileCubeStorage
 
 def from_grid(y: np.array, x: np.array, proj: pyproj.CRS = None, storage: TileCubeStorage = None):
     tiler_factory = TilerFactory(y, x, proj)
-    tc = TileCube(tiler_factory, storage)
+    tc = TileCube(tiler_factory)
     if storage is not None:
-        storage.write_tiler_factory(tiler_factory)
+        tc.save(storage)
     return tc
 
 
@@ -37,6 +37,19 @@ class TileCube:
         """
         self.tiler_factory = tiler_factory
         self.storage = storage
+
+    def __repr__(self):
+        s = f'TileCube object with input grid dimensions: ' \
+            f'y={self.tiler_factory.src_y.shape}, ' \
+            f'x={self.tiler_factory.src_x.shape}\n'
+        if self.storage is not None:
+            s += 'References storage object: \n\t'
+            s += str(self.storage).replace('\n', '\n\t')
+        return s
+
+    def save(self, storage: TileCubeStorage):
+        self.storage = storage
+        storage.write_tiler_factory(self.tiler_factory)
 
     def get_tiler(self, tile: Tile, method: str = None) -> Tiler or None:
         """ Read or calculate a Tiler.

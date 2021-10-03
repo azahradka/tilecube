@@ -10,9 +10,21 @@ from tilecube.core import TilerFactory, Tiler
 class TileCubeStorage:
 
     min_tilecube_version = '0.0.1'
+    MAX_ZOOM_LEVEL = 19
+    INDEX_LENGTHS = {z: 2 ** z for z in range(MAX_ZOOM_LEVEL)}
 
-    def __init__(self):
-        self.index_lengths = {z: 2**z for z in range(0, 19)}
+    def __repr__(self):
+        s = ''
+        for z in range(self.MAX_ZOOM_LEVEL):
+            indices = self.read_zoom_level_indices(0)
+            if indices is None:
+                break
+            tiles = np.sum(indices[indices == 1]) + np.sum(indices[indices == -1])
+            total = self.INDEX_LENGTHS[z]
+            s += f'Z = {z}: {tiles} / {total}\n'
+        if s == '':
+            s = 'No zoom levels initialized.'
+        return s
 
     @staticmethod
     def _get_parent_tile(tile: morecantile.Tile):
