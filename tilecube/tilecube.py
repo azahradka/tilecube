@@ -1,4 +1,4 @@
-from typing import List
+import typing as t
 
 import numpy as np
 import pyproj
@@ -17,7 +17,7 @@ def from_grid(y: np.array, x: np.array, proj: pyproj.CRS = None, storage: TileCu
     return tc
 
 
-def load(storage: TileCubeStorage):
+def from_storage(storage: TileCubeStorage):
     tiler_factory = storage.read_tiler_factory()
     tc = TileCube(tiler_factory, storage)
     return tc
@@ -111,7 +111,7 @@ class TileCube:
             self.storage.write_tiler(tiler)
 
     @staticmethod
-    def _determine_zoom_level_tiles_to_calculate(z: int, parent_tile_indices: np.ndarray) -> List[Tile]:
+    def _determine_zoom_level_tiles_to_calculate(z: int, parent_tile_indices: np.ndarray) -> t.List[Tile]:
         """ Determine a list of the tiles to process for a given zoom level.
 
         These are tiles which are likely to have a spatial intersection with the source data (ie the tile parent one
@@ -131,8 +131,8 @@ class TileCube:
         # If we have the parent tile index, make sure the shape of it is as expected
         if parent_tile_indices.shape[0] != parent_tile_indices.shape[1]:
             raise ValueError('`parent_tile_indices` array should be square')
-        if parent_tile_indices.shape[0] * 2 != 2**z:
-            raise ValueError(f'The shape of `parent_tile_indices` should be {2**z} for zoom level {z}, '
+        if parent_tile_indices.shape[0] != 2**(z - 1):
+            raise ValueError(f'The shape of `parent_tile_indices` should be {2**(z - 1)} for zoom level {z}, '
                              f'not {parent_tile_indices.shape[0]}')
         # We want to calculate tiles if the parent tile exists or is unknown
         tile_indices = np.empty((parent_tile_indices.shape[0] * 2, parent_tile_indices.shape[1] * 2), np.int8)
@@ -148,7 +148,7 @@ class TileCube:
         tiles = [Tile(x, y, z) for (x, y) in zip(x_needs_calc, y_needs_calc)]
         return tiles
 
-    def generate_zoom_level_tilers(self, z: int, method: str, dask_client=None):
+    def generate_zoom_level_tilers(self, z: t.Union[int, t.List[int]], method: str, dask_client=None):
         """ Generate and save `Tiler` objects for all possible tiles at a given zoom level
 
         Attempt to calculate and save to storage a `Tiler` object for all 2**Z tiles at a given web map zoom level.
@@ -159,7 +159,7 @@ class TileCube:
         parallel using all available cores on a local machine or Dask cluster. Operation is not threadsafe.
 
         Args:
-            z: Zoom level (>=0) to calculate `Tiles` for
+            z:
             method:
             dask_client:
 
@@ -169,19 +169,23 @@ class TileCube:
         if self.storage is None:
             raise RuntimeError('Cannot write Tilers when there is no storage object associated '
                                'with the TileCube')
-        parent_tile_indices = self.storage.read_zoom_level_indices(z)
-        tiles_to_process = self._determine_zoom_level_tiles_to_calculate(z, parent_tile_indices)
-        if len(tiles_to_process) == 0:
-            return
-        if dask_client is None:
-            for tile in tiles_to_process:
-                tiler = self.tiler_factory.generate_tiler(tile, method)
-                self.write_tiler(tile, tiler)
-        else:
-            # Test the calculation of the first tile locally, to make debugging of potential issues easier
-            tile0 = tiles_to_process.pop(0)
-            tiler0 = self.tiler_factory.generate_tiler(tile0, method)
-            self.write_tiler(tile0, tiler0)
-            tilers = distributed.calculate_tilers_distributed(self.tiler_factory, tiles_to_process, method, dask_client)
-            for tile, tiler in tilers:
-                self.write_tiler(tile, tiler)
+        z_to_process = z
+        if type(z_to_process) == int:
+            z_to_process = list(z_to_process)
+        for z in z_to_process:
+            parent_tile_indices = self.storage.read_zoom_level_indices(z - 1)
+            tiles_to_process = self._determine_zoom_level_tiles_to_calculate(z, parent_tile_indices)
+            if len(tiles_to_process) == 0:
+                continue
+            if dask_client is None:
+                for tile in tiles_to_process:
+                    tiler = self.tiler_factory.generate_tiler(tile, method)
+                    self.write_tiler(tile, tiler)
+            else:
+                # Test the calculation of the first tile locally, to make debugging of potential issues easier
+                tile0 = tiles_to_process.pop(0)
+                tiler0 = self.tiler_factory.generate_tiler(tile0, method)
+                self.write_tiler(tile0, tiler0)
+                tilers = distributed.calculate_tilers_distributed(self.tiler_factory, tiles_to_process, method, dask_client)
+                for tile, tiler in tilers:
+                    self.write_tiler(tile, tiler)

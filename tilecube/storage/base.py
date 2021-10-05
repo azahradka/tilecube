@@ -10,18 +10,16 @@ from tilecube.core import TilerFactory, Tiler
 class TileCubeStorage:
 
     min_tilecube_version = '0.0.1'
-    MAX_ZOOM_LEVEL = 19
-    INDEX_LENGTHS = {z: 2 ** z for z in range(MAX_ZOOM_LEVEL)}
 
     def __repr__(self):
         s = ''
-        for z in range(self.MAX_ZOOM_LEVEL):
-            indices = self.read_zoom_level_indices(0)
+        for z in range(1000):  # Arbitrary large number, go till there are no more indices initialized
+            indices = self.read_zoom_level_indices(z)
             if indices is None:
                 break
-            tiles = np.sum(indices[indices == 1]) + np.sum(indices[indices == -1])
-            total = self.INDEX_LENGTHS[z]
-            s += f'Z = {z}: {tiles} / {total}\n'
+            tiles = np.sum(indices[indices == 1]) + np.sum(indices[indices == 0])
+            total = self._index_length(z)
+            s += f'\tZ={z}: {tiles} / {total} tiles calculated\n'
         if s == '':
             s = 'No zoom levels initialized.'
         return s
@@ -33,6 +31,10 @@ class TileCubeStorage:
             math.floor(tile.y / 2),
             tile.z - 1)
         return parent_tile
+
+    @staticmethod
+    def _index_length(z: int):
+        return 2 ** z
 
     @abc.abstractmethod
     def write_tiler_factory(self, tiler_factory: TilerFactory):

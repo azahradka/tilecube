@@ -14,13 +14,29 @@ class HDF5TileCubeStorage(TileCubeStorage):
     def __init__(self, filename: str, mode: str = 'a'):
         super().__init__()
         self.filename = filename
-        self.file: h5py.File = h5py.File(filename, mode)
+        self.mode = mode
+        self.file: h5py.File = None
 
     def __repr__(self):
         super_str = super().__repr__()
         s = f'HDF5TileCubeStorage referencing: {self.filename}\n'
         s += super_str
         return s
+
+    def __enter__(self):
+        self.open()
+        return self
+
+    def __exit__(self, type, value, traceback):
+        self.close()
+
+    def open(self):
+        self.file: h5py.File = h5py.File(self.filename, self.mode)
+        return self
+
+    def close(self):
+        self.file.close()
+        return self
 
     def write_tiler_factory(self, tiler_factory: TilerFactory):
         if 'src_x' in self.file:
@@ -69,7 +85,7 @@ class HDF5TileCubeStorage(TileCubeStorage):
         if 'index' not in grp:
             grp.create_dataset(
                 'index',
-                shape=(self.INDEX_LENGTHS[tile.z], self.INDEX_LENGTHS[tile.z]),
+                shape=(self._index_length(tile.z), self._index_length(tile.z)),
                 dtype=np.int8,
                 fillvalue=-1)
         if value:
