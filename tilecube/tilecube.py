@@ -4,6 +4,7 @@ import logging
 import numpy as np
 import pyproj
 from morecantile import Tile
+from tqdm import tqdm
 
 from tilecube import distributed
 from tilecube.core import TilerFactory, Tiler
@@ -98,7 +99,7 @@ class TileCube:
             tiler = self.tiler_factory.generate_tiler(tile, method)
         return tiler
 
-    def write_tiler(self, tile: Tile, tiler: Tiler):
+    def write_tiler(self, tile: Tile, tiler: t.Union[Tiler, None]):
         log = logging.getLogger(__name__)
         if self.storage is None:
             raise RuntimeError('Cannot write Tiler when there is no storage object associated '
@@ -116,7 +117,10 @@ class TileCube:
             self.storage.write_tiler(tiler)
 
     @staticmethod
-    def _determine_zoom_level_tiles_to_calculate(z: int, parent_tile_indices: np.ndarray) -> t.List[Tile]:
+    def _determine_zoom_level_tiles_to_calculate(
+            z: int,
+            parent_tile_indices: np.ndarray
+    ) -> t.Tuple[t.List[Tile], t.List[Tile]]:
         """ Determine a list of the tiles to process for a given zoom level.
 
         These are tiles which are likely to have a spatial intersection with the source data (ie the tile parent one
@@ -133,7 +137,7 @@ class TileCube:
             for y in range(2**z):
                 for x in range(2**z):
                     tiles_to_process.append(Tile(x, y, z))
-            return tiles_to_process
+            return tiles_to_process, []
         # If we have the parent tile index, make sure the shape of it is as expected
         if parent_tile_indices.shape[0] != parent_tile_indices.shape[1]:
             raise ValueError('`parent_tile_indices` array should be square')
@@ -154,8 +158,11 @@ class TileCube:
         y = np.vstack([np.arange(tile_indices.shape[1])] * tile_indices.shape[0]).T
         x_needs_calc = x[needs_calculation]
         y_needs_calc = y[needs_calculation]
-        tiles = [Tile(x, y, z) for (x, y) in zip(x_needs_calc, y_needs_calc)]
-        return tiles
+        tiles_to_calc = [Tile(x, y, z) for (x, y) in zip(x_needs_calc, y_needs_calc)]
+        x_to_skip = x[~needs_calculation]
+        y_to_skip = y[~needs_calculation]
+        tiles_to_skip = [Tile(x, y, z) for (x, y) in zip(x_to_skip, y_to_skip)]
+        return tiles_to_calc, tiles_to_skip
 
     def generate_zoom_level_tilers(self, z: t.Union[int, t.List[int]], method: str, dask_client=None):
         """ Generate and save `Tiler` objects for all possible tiles at a given zoom level
@@ -186,12 +193,14 @@ class TileCube:
         for z in z_to_process:
             log.info(f'Generating Tilers for zoom level {z}.')
             parent_tile_indices = self.storage.read_zoom_level_indices(z - 1)
-            tiles_to_process = self._determine_zoom_level_tiles_to_calculate(z, parent_tile_indices)
+            tiles_to_process, tiles_to_skip = self._determine_zoom_level_tiles_to_calculate(z, parent_tile_indices)
+            for tile in tiles_to_skip:
+                self.write_tiler(tile, None)
             if len(tiles_to_process) == 0:
                 log.info(f'No Tilers to generate at zoom level {z}.')
                 continue
             if dask_client is None:
-                for i, tile in enumerate(tiles_to_process):
+                for i, tile in enumerate(tqdm(tiles_to_process)):
                     log.info(f'Generating tile {i+1} of {len(tiles_to_process)} ({tile.x}, {tile.y}, {tile.z}).')
                     tiler = self.tiler_factory.generate_tiler(tile, method)
                     self.write_tiler(tile, tiler)

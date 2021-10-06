@@ -18,6 +18,9 @@ class HDF5TileCubeStorage(TileCubeStorage):
         self.file: h5py.File = None
 
     def __repr__(self):
+        if self.file is None:
+            return f'Closed HDF5TileCubeStorage referencing: {self.filename}\n'
+        self._verify_file_open()
         super_str = super().__repr__()
         s = f'HDF5TileCubeStorage referencing: {self.filename}\n'
         s += super_str
@@ -35,8 +38,18 @@ class HDF5TileCubeStorage(TileCubeStorage):
 
     def close(self):
         self.file.close()
+        self.file = None
+
+    def _verify_file_open(self):
+        if self.file is None:
+            raise RuntimeError(f'HDF5 File {self.filename} needs to be open to read/write.')
+        try:
+            _ = self.file.mode
+        except ValueError as e:
+            raise RuntimeError(f'HDF5 File {self.filename} needs to be open to read/write.') from e
 
     def write_tiler_factory(self, tiler_factory: TilerFactory):
+        self._verify_file_open()
         if 'src_x' in self.file:
             del self.file['src_x']
         if 'src_y' in self.file:
@@ -64,6 +77,7 @@ class HDF5TileCubeStorage(TileCubeStorage):
                                f'file to proceed.')
 
     def read_tiler_factory(self) -> TilerFactory:
+        self._verify_file_open()
         # TODO add y_flipped
         if 'src_x' not in self.file or 'src_y' not in self.file or 'tilecube_version' not in self.file.attrs:
             raise RuntimeError('The file does not contain a valid TileCube')
@@ -79,6 +93,7 @@ class HDF5TileCubeStorage(TileCubeStorage):
         return tiler_factory
 
     def write_index(self, tile: Tile, value: bool):
+        self._verify_file_open()
         grp = self.file.require_group(f'/{tile.z}')
         if 'index' not in grp:
             grp.create_dataset(
@@ -92,6 +107,7 @@ class HDF5TileCubeStorage(TileCubeStorage):
             grp['index'][tile.x, tile.y] = 0
 
     def read_index(self, tile) -> bool or None:
+        self._verify_file_open()
         if f'/{tile.z}/index' not in self.file:
             return None
         value = self.file[str(tile.z)]['index'][tile.x][tile.y]
@@ -105,21 +121,25 @@ class HDF5TileCubeStorage(TileCubeStorage):
             raise ValueError(f'Expected index value to be -1, 0, or 1, not {value}.')
 
     def read_parent_index(self, tile) -> bool or None:
+        self._verify_file_open()
         if str(tile.z - 1) in self.file.keys():
             parent_tile = self._get_parent_tile(tile)
             return self.read_index(parent_tile)
 
     def read_zoom_level_indices(self, z: int) -> np.ndarray or None:
+        self._verify_file_open()
         if f'/{z}/index' not in self.file:
             return None
         indices = self.file[str(z)]['index']
         return indices[()]
 
     def write_method(self, tile, method):
+        self._verify_file_open()
         grp = self.file.require_group(f'/{tile.z}')
         grp.attrs['method'] = method
 
     def read_method(self, tile) -> str or None:
+        self._verify_file_open()
         if f'/{tile.z}' not in self.file:
             return None
         attrs = self.file[str(tile.z)].attrs
@@ -129,6 +149,7 @@ class HDF5TileCubeStorage(TileCubeStorage):
             return None
 
     def write_tiler(self, tiler: Tiler):
+        self._verify_file_open()
         grp_name = f'/{tiler.tile.z}/{tiler.tile.x}/{tiler.tile.y}'
         if grp_name in self.file:
             del self.file[grp_name]
@@ -141,6 +162,7 @@ class HDF5TileCubeStorage(TileCubeStorage):
         grp.attrs['bounds'] = tiler.bounds
 
     def read_tiler(self, tile: Tile) -> Tiler or None:
+        self._verify_file_open()
         # Check tile_factory index
         index_val = self.read_index(tile)
         if index_val is None or index_val is False:
@@ -162,6 +184,7 @@ class HDF5TileCubeStorage(TileCubeStorage):
         return Tiler(tile, weights, bounds, shape_in, shape_out)
 
     def check_tiler_exists(self, tile: Tile) -> bool:
+        self._verify_file_open()
         if f'/{tile.z}/{tile.x}/{tile.y}' in self.file:
             return True
         else:

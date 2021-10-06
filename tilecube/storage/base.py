@@ -12,14 +12,22 @@ class TileCubeStorage:
     min_tilecube_version = '0.0.1'
 
     def __repr__(self):
+        try:
+            s = self._get_details_str()
+        except Exception as e:
+            s = 'No zoom level data available.'
+        return s
+
+    def _get_details_str(self):
         s = ''
-        for z in range(1000):  # Arbitrary large number, go till there are no more indices initialized
+        for z in range(100):  # Arbitrary large number, go till there are no more indices initialized
             indices = self.read_zoom_level_indices(z)
             if indices is None:
                 break
-            tiles = np.sum(indices[indices == 1]) + np.sum(indices[indices == 0])
-            total = self._index_length(z)
-            s += f'\tZ={z}: {tiles} / {total} tiles calculated\n'
+            num_exist = np.sum(indices[indices == 1])
+            num_notinitialized = -1 * np.sum(indices[indices == -1])
+            total = self._index_length(z) ** 2
+            s += f'\tZ={z}: {num_exist} / {total} tiles exist, {num_notinitialized} missing.\n'
         if s == '':
             s = 'No zoom levels initialized.'
         return s
