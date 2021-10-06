@@ -46,16 +46,14 @@ def test_generate_zoom_level_local(tf:TilerFactory):
     method = 'bilinear'
     z = 0
     with tempfile.TemporaryDirectory() as tmpdir:
-        storage = HDF5TileCubeStorage(os.path.join(tmpdir, 'test_generate_zoom_level_local.hdf5'))
-        tc = TileCube(tf, storage)
-        tc.generate_zoom_level_tilers(z, method)
-        assert list(tc.storage.file) == ['0']
-        assert list(tc.storage.file['0']) == ['0', 'index']
-        assert list(tc.storage.file['0']['0']['0']) == ['S', 'col', 'row']
-        tc.generate_zoom_level_tilers(1, method)
-        assert list(tc.storage.file) == ['0', '1']
-        assert list(tc.storage.file['1']) == ['0', '1', 'index']
-        assert list(tc.storage.file['1']['0']) == ['0', '1']
-        assert list(tc.storage.file['1']['1']['0']) == ['S', 'col', 'row']
-
-
+        with HDF5TileCubeStorage(os.path.join(tmpdir, 'test_generate_zoom_level_local.hdf5')) as storage:
+            tc = TileCube(tf, storage)
+            tc.generate_zoom_level_tilers(z, method)
+            assert list(tc.storage.file) == ['0']
+            assert list(tc.storage.file['0']) == ['0', 'index']
+            assert list(tc.storage.file['0']['0']['0']) == ['S', 'col', 'row']
+            tc.generate_zoom_level_tilers(1, method)
+            assert list(tc.storage.file) == ['0', '1']
+            assert list(tc.storage.file['1']) == ['0', '1', 'index']
+            assert list(tc.storage.file['1']['0']) == ['0', '1']
+            assert list(tc.storage.file['1']['1']['0']) == ['S', 'col', 'row']

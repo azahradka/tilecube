@@ -4,6 +4,7 @@ import tempfile
 import pytest
 from dask import distributed as dd
 from morecantile import Tile
+import numpy as np
 
 from tilecube import TileCube
 from tilecube import distributed
@@ -16,6 +17,14 @@ def dask_client():
     client = dd.Client()
     yield client
     client.close()
+
+
+@pytest.fixture
+def tf():
+    lat = np.arange(-60, 60, 0.3)
+    lon = np.arange(-120, 120, 0.4)
+    tf = TilerFactory(lat, lon)
+    return tf
 
 
 def test_dask_worker_calculate_tile_generators_local(tf: TilerFactory):
@@ -83,14 +92,14 @@ def test_generate_zoom_level_dask(tf:TilerFactory, dask_client):
     method = 'bilinear'
     z = 0
     with tempfile.TemporaryDirectory() as tmpdir:
-        storage = HDF5TileCubeStorage(os.path.join(tmpdir, 'test_generate_zoom_level_local.hdf5'))
-        tc = TileCube(tf, storage)
-        tc.generate_zoom_level_tilers(z, method, dask_client=dask_client)
-        assert list(tc.storage.file) == ['0']
-        assert list(tc.storage.file['0']) == ['0', 'index']
-        assert list(tc.storage.file['0']['0']['0']) == ['S', 'col', 'row']
-        tc.generate_zoom_level_tilers(1, method, dask_client=dask_client)
-        assert list(tc.storage.file) == ['0', '1']
-        assert list(tc.storage.file['1']) == ['0', '1', 'index']
-        assert list(tc.storage.file['1']['0']) == ['0', '1']
-        assert list(tc.storage.file['1']['1']['0']) == ['S', 'col', 'row']
+        with HDF5TileCubeStorage(os.path.join(tmpdir, 'test_generate_zoom_level_local.hdf5')) as storage:
+            tc = TileCube(tf, storage)
+            tc.generate_zoom_level_tilers(z, method, dask_client=dask_client)
+            assert list(tc.storage.file) == ['0']
+            assert list(tc.storage.file['0']) == ['0', 'index']
+            assert list(tc.storage.file['0']['0']['0']) == ['S', 'col', 'row']
+            tc.generate_zoom_level_tilers(1, method, dask_client=dask_client)
+            assert list(tc.storage.file) == ['0', '1']
+            assert list(tc.storage.file['1']) == ['0', '1', 'index']
+            assert list(tc.storage.file['1']['0']) == ['0', '1']
+            assert list(tc.storage.file['1']['1']['0']) == ['S', 'col', 'row']
