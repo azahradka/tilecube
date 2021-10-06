@@ -28,7 +28,7 @@ def tilemap(
     """
     def decorator(func: t.Callable) -> t.Callable:
         @wraps(func)
-        def function_wrapper(z, y, x, *args, **kwargs) -> io.BytesIO:
+        def function_wrapper(z, x, y, *args, **kwargs) -> io.BytesIO:
             tile = morecantile.Tile(x, y, z)
             tiler = tilecube.tiler_factory.generate_tiler(tile, method)  # TODO variable methods
             if tiler is None:
