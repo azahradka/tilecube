@@ -17,13 +17,12 @@ class Tiler:
     """ Transforms source data into a given web map grid
 
     """
-    def __init__(self, tile: Tile, weights, bounds, shape_in, shape_out, y_flipped=False):
+    def __init__(self, tile: Tile, weights, bounds, shape_in, shape_out):
         self.tile = tile
         self.weights = weights
         self.bounds = bounds
         self.shape_in = shape_in
         self.shape_out = shape_out
-        self.y_flipped = y_flipped
 
     def to_dict(self) -> dict:
         d = self.__dict__
@@ -35,10 +34,7 @@ class Tiler:
         return tiler
 
     def regrid(self, data: np.array):
-        vals = data
-        if self.y_flipped:
-            vals = vals[::-1, :]
-        data_out = xe.smm.apply_weights(self.weights, vals, self.shape_in, self.shape_out)
+        data_out = xe.smm.apply_weights(self.weights, data, self.shape_in, self.shape_out)
         return data_out
 
     @property
@@ -85,16 +81,11 @@ class TilerFactory:
                 dimensional for general curvilinear grids. Two dimensional grids must have axis order (y, x).
             y: array of the Y coordinates of the source grid. Can be one dimensional for rectilinear grids or two
                 dimensional for general curvilinear grids. Two dimensional grids must have axis order (y, x).
-            proj: Coordinate Reference System (CRS) of the source grid. Defaults to Lat/Lon (EPSG:3857)
+            proj: Coordinate Reference System (CRS) of the source grid. Defaults to Lat/Lon (EPSG:4326)
         """
         self.src_y = y
         self.src_x = x
         self.ygrid, self.xgrid = self._input_grid_to_2d(y, x)
-        # There is no widely followed convention for the order of the y-axis in geospatial array datasets
-        # This corresponds to the 'spatial reference point' of the array being in the top left (y decreasing) or
-        # bottom left (y increasing). The convention for exporting png tiles from numpy is to have the reference point
-        # in the top left so we will make sure that convention is followed for all processing within the TileCube.
-        self.y_flipped, self.ygrid = self._correct_flipped_y_orientation(self.ygrid)
 
         # Take the x and y coordinate grids and generate a table of the grid points:
         #   x-axis index, y-axis index, x-coordinate, y-coordinate
@@ -131,16 +122,6 @@ class TilerFactory:
                 self.src_proj, self.lonlat_proj, always_xy=True)
         self.tile_src_transformer = pyproj.Transformer.from_crs(
             self.tile_proj, self.src_proj, always_xy=True)
-
-    @staticmethod
-    def _correct_flipped_y_orientation(ygrid):
-        if ygrid[-1, 0] > ygrid[0, 0]:
-            y_flipped = True
-            corrected_ygrid = ygrid[::-1, :]
-        else:
-            y_flipped = False
-            corrected_ygrid = ygrid
-        return y_flipped, corrected_ygrid
 
     @staticmethod
     def _input_grid_to_2d(y, x):
@@ -332,6 +313,9 @@ class TilerFactory:
         # Generate `xesmf.Regridder` from source grid to tile grid
         regridder = xe.Regridder({'lon': src_longrid_subset, 'lat': src_latgrid_subset},
                                  {'lon': tile_longrid, 'lat': tile_latgrid}, method)
+        # Workaround for NaN values https://github.com/JiaweiZhuang/xESMF/issues/15
+        # Note that scipy will issue a warning that "editing a csr matrix is slow", but lil_matrix doesn't have indptr
+        # so we are stuck with this for now.
         X = regridder.weights
         M = scipy.sparse.csr_matrix(X)
         num_nonzeros = np.diff(M.indptr)
@@ -343,6 +327,5 @@ class TilerFactory:
             regridder.weights,
             bounds,
             regridder.shape_in,
-            regridder.shape_out,
-            self.y_flipped)
+            regridder.shape_out)
         return tiler
