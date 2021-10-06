@@ -32,11 +32,9 @@ class HDF5TileCubeStorage(TileCubeStorage):
 
     def open(self):
         self.file: h5py.File = h5py.File(self.filename, self.mode)
-        return self
 
     def close(self):
         self.file.close()
-        return self
 
     def write_tiler_factory(self, tiler_factory: TilerFactory):
         if 'src_x' in self.file:
@@ -115,7 +113,7 @@ class HDF5TileCubeStorage(TileCubeStorage):
         if f'/{z}/index' not in self.file:
             return None
         indices = self.file[str(z)]['index']
-        return indices
+        return indices[()]
 
     def write_method(self, tile, method):
         grp = self.file.require_group(f'/{tile.z}')
@@ -131,7 +129,10 @@ class HDF5TileCubeStorage(TileCubeStorage):
             return None
 
     def write_tiler(self, tiler: Tiler):
-        grp = self.file.require_group(f'/{tiler.tile.z}/{tiler.tile.x}/{tiler.tile.y}')
+        grp_name = f'/{tiler.tile.z}/{tiler.tile.x}/{tiler.tile.y}'
+        if grp_name in self.file:
+            del self.file[grp_name]
+        grp = self.file.create_group(grp_name)
         grp.create_dataset('row', (tiler.weights.nnz,), dtype='int32', data=tiler.weights.row)
         grp.create_dataset('col', (tiler.weights.nnz,), dtype='int32', data=tiler.weights.col)
         grp.create_dataset('S', (tiler.weights.nnz,), dtype=tiler.weights.dtype, data=tiler.weights.data)
