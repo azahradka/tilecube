@@ -78,7 +78,6 @@ class HDF5TileCubeStorage(TileCubeStorage):
 
     def read_tiler_factory(self) -> TilerFactory:
         self._verify_file_open()
-        # TODO add y_flipped
         if 'src_x' not in self.file or 'src_y' not in self.file or 'tilecube_version' not in self.file.attrs:
             raise RuntimeError('The file does not contain a valid TileCube')
         self._verify_version_compatibility(self.file.attrs['tilecube_version'])
@@ -87,8 +86,8 @@ class HDF5TileCubeStorage(TileCubeStorage):
         # tile_proj_json = self.file.attrs['tile_proj']
         # tile_proj = pyproj.CRS.from_json(tile_proj_json)
         tiler_factory = TilerFactory(
-            self.file['src_x'],
             self.file['src_y'],
+            self.file['src_x'],
             proj=src_proj)
         return tiler_factory
 
