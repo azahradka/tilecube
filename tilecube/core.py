@@ -10,6 +10,7 @@ import xesmf.smm
 from morecantile import Tile
 from shapely import geometry
 from shapely.strtree import STRtree
+import shapely.vectorized
 
 
 class Tiler:
@@ -269,19 +270,16 @@ class TilerFactory:
         # Select grid of source coordinates which intersect the current tile and then reproject to lat/long
         # Include an additional grid point on each side because we need to have the first data point outside a
         # given tile domain for some regridding algorithms to work (e.g. "conservative").
-                # mask: np.ndarray = shapely.vectorized.contains(tile_bounding_poly, self.xv, self.yv)
-        intersecting_points = self.xyv_points_index.query(tile_bounding_poly)
-        intersecting_points_ids = [self.xyv_points_index_ids[id(pt)] for pt in intersecting_points]
-
-        if len(intersecting_points) > 0:
+        mask: np.ndarray = shapely.vectorized.contains(tile_bounding_poly, self.xv, self.yv)
+        if sum(mask) > 0:
             # Select the min/max index values for the x and y coordinate axes.
             # If possible, take one additional index position below/above the min/max, respectively.
             # Note that ix_max and iy_max have an addition +1 to make the endpoint inclusive during numpy
             #   endpoint-exclusive slicing
-            ix_min = max(np.min(self.ixv[intersecting_points_ids]) - 1, np.min(self.ixv))
-            ix_max = min(np.max(self.ixv[intersecting_points_ids]) + 1, np.max(self.ixv)) + 1
-            iy_min = max(np.min(self.iyv[intersecting_points_ids]) - 1, np.min(self.iyv))
-            iy_max = min(np.max(self.iyv[intersecting_points_ids]) + 1, np.max(self.iyv)) + 1
+            ix_min = max(np.min(self.ixv[mask]) - 1, np.min(self.ixv))
+            ix_max = min(np.max(self.ixv[mask]) + 1, np.max(self.ixv)) + 1
+            iy_min = max(np.min(self.iyv[mask]) - 1, np.min(self.iyv))
+            iy_max = min(np.max(self.iyv[mask]) + 1, np.max(self.iyv)) + 1
             src_ygrid_subset = self.ygrid[iy_min:iy_max, ix_min:ix_max]
             src_xgrid_subset = self.xgrid[iy_min:iy_max, ix_min:ix_max]
         else:
@@ -293,7 +291,7 @@ class TilerFactory:
             # If the grid region doesn't contain the tile, then the tile bounds are outside the source grid extent.
             # Note that ix_max and iy_max have an addition +1 to make the endpoint inclusive during numpy
             #   endpoint-exclusive slicing
-            nearest_point = self.xyv_points_index.nearest(tile_bounding_poly)
+            nearest_point = self.xyv_points_index.nearest(tile_bounding_poly.centroid)
             nearest_point_id = self.xyv_points_index_ids[id(nearest_point)]
             ix_min = max(self.ixv[nearest_point_id] - 1, np.min(self.ixv))
             ix_max = min(self.ixv[nearest_point_id] + 1, np.max(self.ixv)) + 1
