@@ -1,4 +1,5 @@
 import typing as t
+import logging
 
 import numpy as np
 import pyproj
@@ -98,16 +99,20 @@ class TileCube:
         return tiler
 
     def write_tiler(self, tile: Tile, tiler: Tiler):
+        log = logging.getLogger(__name__)
         if self.storage is None:
             raise RuntimeError('Cannot write Tiler when there is no storage object associated '
                                'with the TileCube')
         if tiler is None:
             # There was no intersect between the source grid and this tile, so set the tile index to False
+            log.debug('Writing "False" index.')
             self.storage.write_index(tile, False)
         else:
             # We were able to calculate a tile generator for this tile, so set the tile index to True and write the
             # tile generator to storage.
+            log.debug('Writing "True" index.')
             self.storage.write_index(tile, True)
+            log.debug('Writing Tiler.')
             self.storage.write_tiler(tiler)
 
     @staticmethod
@@ -119,14 +124,15 @@ class TileCube:
 
         :param z: Zoom level for which to calculate the list of tiles
         :param parent_tile_indices: Array of the parent tile indices, if exists
+            These are the index values showing the existance of a tile at zoom level z - 1
         :return: List of the tiles which are needed to be calculated at the given zoom level
         """
         # If we don't have a tile index for one zoom level up, we need to calculate all tiles
         if parent_tile_indices is None:
             tiles_to_process = []
-            for parent_y in range(2**z):
-                for parent_x in range(2**z):
-                    tiles_to_process.append(Tile(parent_x, parent_y, z))
+            for y in range(2**z):
+                for x in range(2**z):
+                    tiles_to_process.append(Tile(x, y, z))
             return tiles_to_process
         # If we have the parent tile index, make sure the shape of it is as expected
         if parent_tile_indices.shape[0] != parent_tile_indices.shape[1]:
@@ -134,13 +140,16 @@ class TileCube:
         if parent_tile_indices.shape[0] != 2**(z - 1):
             raise ValueError(f'The shape of `parent_tile_indices` should be {2**(z - 1)} for zoom level {z}, '
                              f'not {parent_tile_indices.shape[0]}')
-        # We want to calculate tiles if the parent tile exists or is unknown
+        # Each parent tile is split into 4.
+        # So tile_indices[0:2, 0:2] are from parent[0, 0], tile_indices[2:4, 0:2] are from parent[1, 0], etc.
         tile_indices = np.empty((parent_tile_indices.shape[0] * 2, parent_tile_indices.shape[1] * 2), np.int8)
         tile_indices[::2, ::2] = parent_tile_indices
         tile_indices[1::2, ::2] = parent_tile_indices
         tile_indices[::2, 1::2] = parent_tile_indices
         tile_indices[1::2, 1::2] = parent_tile_indices
+        # We want to calculate tiles if the parent tile exists or is unknown.
         needs_calculation = (tile_indices == 1) | (tile_indices == -1)
+        # Create matrix of x and y index positions, and filter them to the ones which need calculation
         x = np.vstack([np.arange(tile_indices.shape[0])] * tile_indices.shape[1])
         y = np.vstack([np.arange(tile_indices.shape[1])] * tile_indices.shape[0]).T
         x_needs_calc = x[needs_calculation]
@@ -166,26 +175,35 @@ class TileCube:
         Returns:
 
         """
+        log = logging.getLogger(__name__)
         if self.storage is None:
             raise RuntimeError('Cannot write Tilers when there is no storage object associated '
                                'with the TileCube')
         z_to_process = z
         if type(z_to_process) == int:
-            z_to_process = list(z_to_process)
+            z_to_process = [z_to_process]
+        log.debug(f'Starting calculation of {len(z_to_process)} zoom levels.')
         for z in z_to_process:
+            log.info(f'Generating Tilers for zoom level {z}.')
             parent_tile_indices = self.storage.read_zoom_level_indices(z - 1)
             tiles_to_process = self._determine_zoom_level_tiles_to_calculate(z, parent_tile_indices)
             if len(tiles_to_process) == 0:
+                log.info(f'No Tilers to generate at zoom level {z}.')
                 continue
             if dask_client is None:
-                for tile in tiles_to_process:
+                for i, tile in enumerate(tiles_to_process):
+                    log.info(f'Generating tile {i+1} of {len(tiles_to_process)} ({tile.x}, {tile.y}, {tile.z}).')
                     tiler = self.tiler_factory.generate_tiler(tile, method)
                     self.write_tiler(tile, tiler)
             else:
                 # Test the calculation of the first tile locally, to make debugging of potential issues easier
+                log.info('Calculating Tile 0 locally.')
                 tile0 = tiles_to_process.pop(0)
                 tiler0 = self.tiler_factory.generate_tiler(tile0, method)
                 self.write_tiler(tile0, tiler0)
+                log.info(f'Submitting {len(tiles_to_process)} tiles to Dask client for processing.')
                 tilers = distributed.calculate_tilers_distributed(self.tiler_factory, tiles_to_process, method, dask_client)
+                log.info(f'Successfully calculated {len(tilers)} Tilers. Writing results.')
                 for tile, tiler in tilers:
                     self.write_tiler(tile, tiler)
+                log.info(f'Successfully wrote {len(tilers)} Tilers.')
